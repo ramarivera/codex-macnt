@@ -2,18 +2,12 @@
 # This sets up all dependencies needed to build Codex from macOS to Linux
 
 [tools]
-# Core build tools
+# Core build tools - these mise can install
 rust = "1.93.0"  # Latest stable with required rama-* crate support
 node = "22"      # LTS version for Electron/native modules
-npm = "10"
 
-# System tools needed for extraction
-git = "latest"
-curl = "latest"
-wget = "latest"
-
-# Additional tools that might be useful
-jq = "latest"
+# NOTE: System tools (git, curl, wget, jq, 7z) must be installed via your
+# system package manager. The 'deps' task will verify they're available.
 
 [env]
 # Build configuration
