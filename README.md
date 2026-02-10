@@ -32,6 +32,8 @@ What the script does:
 After success, you get exactly one distributable artifact here:
 
 - `./Codex.AppImage`
+- `./CODEX_APP_VERSION` (app package version from Codex bundle)
+- `./CODEX_CLI_VERSION` (embedded CLI version)
 
 ## Run
 
@@ -69,6 +71,22 @@ Default behavior is `CODEX_GIT_REF=latest-tag`, which selects the newest buildab
 - `docker: command not found`: install Docker/Podman Docker CLI first.
 - GUI says Electron is missing: install with `npm install -g electron`.
 - Build issues with upstream ref: pin `CODEX_GIT_REF` to a known good tag/commit.
+
+## Release automation
+
+Use `scripts/release-appimage.sh` to:
+
+1. Build `Codex.AppImage`.
+2. Detect app version from AppImage package metadata.
+3. Detect CLI version via `./Codex.AppImage --cli --version`.
+4. Update `CODEX_APP_VERSION` and `CODEX_CLI_VERSION`.
+5. Create or update a GitHub release with `gh` using tag `v<app-version>`.
+
+Run:
+
+```nu
+./scripts/release-appimage.sh
+```
 
 ## Nushell compatibility fallback
 
