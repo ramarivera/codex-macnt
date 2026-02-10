@@ -95,15 +95,17 @@ substep "Removing old extraction directory"
 rm -rf extracted
 mkdir -p extracted
 
-substep "Looking for 7z extractor..."
-if command -v 7z &> /dev/null; then
-    success "Found 7z at $(which 7z)"
-else
-    error "7z not found. Please install p7zip-full first."
-fi
+substep "Converting DMG to IMG..."
+dmg2img Codex.dmg Codex.img || error "dmg2img conversion failed"
 
-substep "Extracting DMG with 7z (this may take a moment)..."
-7z x Codex.dmg -oextracted/ -y > /dev/null 2>&1 || error "DMG extraction failed"
+substep "Extracting IMG with 7z..."
+# Extract HFS+ image - ignore errors, some files may still extract
+7z x Codex.img -oextracted/ -y 2>/dev/null || true
+
+# Check if we got anything
+if [ ! "$(ls -A extracted/ 2>/dev/null)" ]; then
+    error "Extraction failed - no files extracted"
+fi
 
 substep "Listing extracted contents:"
 ls -la extracted/ | head -20

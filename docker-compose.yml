@@ -8,7 +8,7 @@ services:
     image: codex-builder:latest
     container_name: codex-linux-builder
     
-    # Resource limits to prevent fork errors
+    # Resource limits (no privileged mode)
     deploy:
       resources:
         limits:
@@ -18,29 +18,23 @@ services:
           cpus: '2'
           memory: 4G
     
-    # Increase process limits
-    ulimits:
-      nproc: 2048
-      nofile:
-        soft: 1024
-        hard: 2048
-    
     # Environment variables
     environment:
       - WORKDIR=/build/codex-work
       - INSTALL_DIR=/output
       - HOME=/build
       - CARGO_BUILD_JOBS=2
-      - RUST_BACKTRACE=1
     
     # Volume mounts
     volumes:
       - ./output:/output
       - codex-cache:/build/codex-work
     
-    # Keep container running if needed for debugging
-    stdin_open: true
-    tty: true
+    # Capabilities for unprivileged DMG extraction
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
 
 volumes:
   codex-cache:

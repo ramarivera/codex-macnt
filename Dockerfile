@@ -2,7 +2,6 @@ FROM rust:1.93-bookworm
 
 # Install all dependencies
 RUN apt-get update && apt-get install -y \
-    p7zip-full \
     build-essential \
     libssl-dev \
     pkg-config \
@@ -12,6 +11,8 @@ RUN apt-get update && apt-get install -y \
     jq \
     nodejs \
     npm \
+    p7zip-full \
+    dmg2img \
     && rm -rf /var/lib/apt/lists/*
 
 # Install asar globally
@@ -20,7 +21,7 @@ RUN npm install -g asar
 # Create working directory
 WORKDIR /build
 
-# Copy the install script into container
+# Copy the install script
 COPY install-codex-linux.sh /usr/local/bin/install-codex.sh
 RUN chmod +x /usr/local/bin/install-codex.sh
 
