@@ -10,6 +10,7 @@ DMG_URL="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 WORKDIR="${WORKDIR:-${HOME}/.cache/codex-linux-port}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 LOG_FILE="${WORKDIR}/install.log"
+ENABLE_LINUX_UI_POLISH="${ENABLE_LINUX_UI_POLISH:-1}"
 
 # Initialize logging
 mkdir -p "${WORKDIR}"
@@ -340,6 +341,98 @@ fi
 
 # Step 8: Create Linux launcher
 step "8/11" "Creating Linux launcher script"
+
+if [[ "${ENABLE_LINUX_UI_POLISH}" == "1" ]]; then
+    substep "Applying Linux UI polish stylesheet..."
+
+    POLISH_CSS_PATH="${WORKDIR}/app_unpacked/webview/assets/linux-polish.css"
+    INDEX_HTML_PATH="${WORKDIR}/app_unpacked/webview/index.html"
+
+    cat > "${POLISH_CSS_PATH}" << 'POLISH_CSS_EOF'
+:root {
+  --linux-glass-bg: color-mix(in srgb, Canvas 78%, transparent);
+  --linux-glass-bg-strong: color-mix(in srgb, Canvas 86%, transparent);
+  --linux-glass-border: color-mix(in srgb, CanvasText 14%, transparent);
+  --linux-glass-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  --linux-glass-radius: 12px;
+}
+
+html,
+body,
+#root {
+  background: radial-gradient(1200px 700px at 10% -10%, rgba(80, 120, 255, 0.08), transparent 60%),
+              radial-gradient(900px 500px at 90% 0%, rgba(0, 200, 170, 0.07), transparent 55%);
+}
+
+nav,
+aside,
+[role="navigation"],
+[class*="sidebar" i],
+[class*="thread" i],
+[class*="panel" i],
+[class*="toolbar" i],
+[class*="header" i] {
+  background-color: var(--linux-glass-bg);
+  border-color: var(--linux-glass-border) !important;
+}
+
+[class*="card" i],
+[class*="surface" i],
+[class*="composer" i],
+input,
+textarea,
+button {
+  border-radius: var(--linux-glass-radius);
+}
+
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  nav,
+  aside,
+  [role="navigation"],
+  [class*="sidebar" i],
+  [class*="thread" i],
+  [class*="panel" i],
+  [class*="toolbar" i],
+  [class*="header" i] {
+    -webkit-backdrop-filter: saturate(1.2) blur(14px);
+    backdrop-filter: saturate(1.2) blur(14px);
+    box-shadow: var(--linux-glass-shadow);
+  }
+}
+
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  nav,
+  aside,
+  [role="navigation"],
+  [class*="sidebar" i],
+  [class*="thread" i],
+  [class*="panel" i],
+  [class*="toolbar" i],
+  [class*="header" i] {
+    background-color: var(--linux-glass-bg-strong);
+  }
+}
+
+* {
+  scrollbar-width: thin;
+}
+POLISH_CSS_EOF
+
+    if [[ -f "${INDEX_HTML_PATH}" ]]; then
+        if grep -q 'linux-polish.css' "${INDEX_HTML_PATH}"; then
+            substep "linux-polish.css already linked in index.html"
+        else
+            sed -i '/<link rel="stylesheet"/a\    <link rel="stylesheet" href="./assets/linux-polish.css">' "${INDEX_HTML_PATH}"
+            success "Linked linux-polish.css in webview/index.html"
+        fi
+    else
+        substep "Warning: webview/index.html not found; skipping CSS link injection"
+    fi
+
+    success "Linux UI polish applied"
+else
+    substep "Linux UI polish disabled (ENABLE_LINUX_UI_POLISH=${ENABLE_LINUX_UI_POLISH})"
+fi
 
 cat > codex-linux.sh << 'LAUNCHER_EOF'
 #!/bin/bash
