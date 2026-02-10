@@ -7,8 +7,8 @@ set -euo pipefail
 # Configuration
 CODEX_VERSION="260208.1016"
 DMG_URL="https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
-WORKDIR="${HOME}/.cache/codex-linux-port"
-INSTALL_DIR="${HOME}/.local/bin"
+WORKDIR="${WORKDIR:-${HOME}/.cache/codex-linux-port}"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 LOG_FILE="${WORKDIR}/install.log"
 
 # Initialize logging
@@ -99,17 +99,7 @@ substep "Looking for 7z extractor..."
 if command -v 7z &> /dev/null; then
     success "Found 7z at $(which 7z)"
 else
-    substep "7z not found, attempting to install..."
-    if command -v apt-get &> /dev/null; then
-        sudo apt-get update -qq && sudo apt-get install -y -qq p7zip-full || error "Failed to install p7zip"
-    elif command -v yum &> /dev/null; then
-        sudo yum install -y -q p7zip || error "Failed to install p7zip"
-    elif command -v pacman &> /dev/null; then
-        sudo pacman -S --noconfirm p7zip || error "Failed to install p7zip"
-    else
-        error "Cannot install 7z automatically. Please install p7zip-full manually."
-    fi
-    success "Installed 7z"
+    error "7z not found. Please install p7zip-full first."
 fi
 
 substep "Extracting DMG with 7z (this may take a moment)..."
