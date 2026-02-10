@@ -96,3 +96,9 @@ If you use Bash/Zsh, equivalent env-var syntax is:
 ENABLE_LINUX_UI_POLISH=0 ./install-codex-linux.sh
 CODEX_GIT_REF=main ./install-codex-linux.sh
 ```
+
+## Disclaimer
+
+This project was built end-to-end using the Codex app and Codex 5.3.
+
+This is an unofficial community project and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex.
