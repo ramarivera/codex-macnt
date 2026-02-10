@@ -12,6 +12,140 @@ INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 LOG_FILE="${WORKDIR}/install.log"
 ENABLE_LINUX_UI_POLISH="${ENABLE_LINUX_UI_POLISH:-1}"
 
+rebuild_native_modules_on_host() {
+    local app_dir="output/codex-linux"
+    local native_build_dir="output/native-build-host"
+
+    if [[ ! -d "${app_dir}" ]]; then
+        return
+    fi
+
+    echo "🧩 Rebuilding native modules on host for Electron runtime..."
+
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        echo "❌ node and npm are required on host for native module rebuild" >&2
+        exit 1
+    fi
+
+    pushd "${app_dir}" >/dev/null
+    PACKAGE_ELECTRON_VERSION=$(node -p "require('./package.json').devDependencies?.electron || ''" 2>/dev/null || true)
+    PACKAGE_ELECTRON_VERSION="${PACKAGE_ELECTRON_VERSION#^}"
+
+    HOST_ELECTRON_VERSION=""
+    if command -v electron >/dev/null 2>&1; then
+        HOST_ELECTRON_VERSION=$(electron --version 2>/dev/null || true)
+        HOST_ELECTRON_VERSION="${HOST_ELECTRON_VERSION#v}"
+        HOST_ELECTRON_VERSION="${HOST_ELECTRON_VERSION#^}"
+    fi
+
+    ELECTRON_VERSION="${HOST_ELECTRON_VERSION:-${PACKAGE_ELECTRON_VERSION}}"
+    if [[ -z "${ELECTRON_VERSION}" ]]; then
+        echo "❌ Unable to determine Electron version for native rebuild" >&2
+        exit 1
+    fi
+
+    if [[ -n "${HOST_ELECTRON_VERSION}" ]]; then
+        echo "ℹ️  Using host Electron ${HOST_ELECTRON_VERSION} for native rebuild"
+    else
+        echo "ℹ️  Using package Electron ${PACKAGE_ELECTRON_VERSION} for native rebuild"
+    fi
+
+    SQLITE_VERSION=$(node -p "require('./node_modules/better-sqlite3/package.json').version" 2>/dev/null || echo "12.5.0")
+    PTY_VERSION=$(node -p "require('./node_modules/node-pty/package.json').version" 2>/dev/null || echo "1.1.0")
+    popd >/dev/null
+
+    rm -rf "${native_build_dir}"
+    mkdir -p "${native_build_dir}"
+    pushd "${native_build_dir}" >/dev/null
+    npm init -y >/dev/null 2>&1
+
+    npm_config_runtime=electron \
+    npm_config_target="${ELECTRON_VERSION}" \
+    npm_config_disturl=https://electronjs.org/headers \
+    npm install --force --no-save "better-sqlite3@${SQLITE_VERSION}" "node-pty@${PTY_VERSION}" >/dev/null
+
+    popd >/dev/null
+
+    mkdir -p "${app_dir}/node_modules/better-sqlite3/build/Release"
+    mkdir -p "${app_dir}/node_modules/node-pty/build/Release"
+    cp -f "${native_build_dir}/node_modules/better-sqlite3/build/Release/better_sqlite3.node" "${app_dir}/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    cp -f "${native_build_dir}/node_modules/node-pty/build/Release/pty.node" "${app_dir}/node_modules/node-pty/build/Release/pty.node"
+
+    if ! file "${app_dir}/node_modules/better-sqlite3/build/Release/better_sqlite3.node" | grep -q ELF; then
+        echo "❌ better-sqlite3 native binary is not Linux ELF" >&2
+        exit 1
+    fi
+
+    if ! file "${app_dir}/node_modules/node-pty/build/Release/pty.node" | grep -q ELF; then
+        echo "❌ node-pty native binary is not Linux ELF" >&2
+        exit 1
+    fi
+
+    if ldd "${app_dir}/node_modules/better-sqlite3/build/Release/better_sqlite3.node" | grep -q libnode; then
+        echo "❌ better-sqlite3 still links libnode; incompatible with Electron runtime" >&2
+        exit 1
+    fi
+
+    if ldd "${app_dir}/node_modules/node-pty/build/Release/pty.node" | grep -q libnode; then
+        echo "❌ node-pty still links libnode; incompatible with Electron runtime" >&2
+        exit 1
+    fi
+
+    echo "✅ Host native module rebuild complete"
+}
+
+run_host_orchestrator() {
+    echo "🐳 Building Codex Linux via Docker..."
+    echo "======================================"
+
+    if ! command -v docker >/dev/null 2>&1; then
+        echo "❌ docker is required to run this script" >&2
+        exit 1
+    fi
+
+    echo "📦 Building Docker image..."
+    docker build --no-cache -t codex-builder .
+
+    mkdir -p output
+
+    echo "🔨 Running build container..."
+    docker run --rm \
+      --cap-add SYS_ADMIN \
+      --security-opt apparmor:unconfined \
+      -e IN_DOCKER_BUILD=1 \
+      -e WORKDIR=/output/work \
+      -e INSTALL_DIR=/output \
+      -e HOME=/build \
+      -e CARGO_BUILD_JOBS=2 \
+      -e ENABLE_LINUX_UI_POLISH="${ENABLE_LINUX_UI_POLISH}" \
+      -v "$(pwd)/output:/output" \
+      codex-builder
+
+    if [[ -d output/work/app_unpacked ]]; then
+        rm -rf output/codex-linux
+        cp -a output/work/app_unpacked output/codex-linux
+    fi
+
+    rebuild_native_modules_on_host
+
+    echo ""
+    echo "✅ Build complete!"
+    echo "=================="
+    echo "📦 App bundle: ./output/codex-linux/"
+    echo "🔧 CLI binary: ./output/codex"
+    echo ""
+    echo "To install CLI system-wide:"
+    echo "  cp ./output/codex ~/.local/bin/"
+    echo ""
+    echo "To run GUI (requires Electron):"
+    echo "  ./output/codex-linux/codex-linux.sh"
+}
+
+if [[ "${IN_DOCKER_BUILD:-0}" != "1" ]]; then
+    run_host_orchestrator "$@"
+    exit 0
+fi
+
 # Initialize logging
 mkdir -p "${WORKDIR}"
 exec 1> >(tee -a "${LOG_FILE}")

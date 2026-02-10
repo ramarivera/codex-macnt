@@ -1,61 +1,50 @@
-# Codex for Linux
+# Codex Linux (Minimal)
 
-Extract OpenAI's Codex from macOS DMG and run it on Linux.
+This repo builds a Linux-usable Codex bundle from the official macOS DMG.
 
-## Quick Start
+## What you run
+
+Use a single orchestrator script:
 
 ```bash
-# Clone and enter repo
-cd codex-linux
-
-# Install dependencies and run build
 ./install-codex-linux.sh
 ```
 
-This will:
-1. Download Codex DMG from OpenAI CDN
-2. Extract the Electron app bundle
-3. Compile the Rust CLI for Linux
-4. Install `codex` to `~/.local/bin/`
+The script will:
+- Build a Docker image
+- Run extraction/build steps inside the container
+- Copy the app to `./output/codex-linux`
+- Rebuild native modules on host for Electron ABI compatibility
 
-## Requirements
+## Output
 
-- Linux (x86_64)
-- 7z (`p7zip-full`)
-- Rust 1.93+
-- Node.js + npm
-- dmg2img
+- App bundle: `./output/codex-linux/`
+- CLI binary: `./output/codex`
 
-## Usage
+Run GUI:
 
 ```bash
-# CLI mode
-codex login
-codex "your coding task"
-
-# GUI mode (requires Electron)
-npm install -g electron
-~/.cache/codex-linux-port/app_unpacked/codex-linux.sh
+./output/codex-linux/codex-linux.sh
 ```
 
-## What This Does
+Run CLI:
 
-Codex is OpenAI's desktop coding assistant. The official release is macOS-only. This tool:
+```bash
+./output/codex --version
+```
 
-- Extracts the UI/resources from the macOS DMG
-- Compiles the Rust CLI core for Linux (from openai/codex repo)
-- Swaps the macOS binary with the Linux binary
-- Removes macOS-only native modules (Sparkle, liquid-glass)
+## Optional flags
 
-## Files
+- Disable Linux UI polish injection:
 
-- `install-codex-linux.sh` - Main installation script
-- `reverse_analysis/` - Reverse engineering documentation
-- `mise.toml` - Build environment configuration
-- `Dockerfile` / `docker-compose.yml` - Container build (optional)
+```bash
+ENABLE_LINUX_UI_POLISH=0 ./install-codex-linux.sh
+```
 
-## Legal
+## Kept files
 
-This is an **unofficial** tool for educational purposes. All Codex branding and code belongs to OpenAI. The Rust CLI is MIT-licensed from github.com/openai/codex.
-
-Use at your own risk. Not endorsed by OpenAI.
+- `README.md`
+- `AGENTS.md`
+- `Dockerfile`
+- `docker-compose.yml`
+- `install-codex-linux.sh`
