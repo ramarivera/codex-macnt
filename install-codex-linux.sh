@@ -132,16 +132,33 @@ fi
 success "Found app.asar at: ${ASAR_PATH}"
 
 substep "Installing asar extractor..."
-if ! command -v asar &> /dev/null; then
-    npm install -g asar 2>&1 | tail -5 || error "Failed to install asar"
-    success "Installed asar globally"
+ASAR_CMD=""
+
+# Try various methods to get asar
+if command -v asar &> /dev/null; then
+    ASAR_CMD="asar"
+    success "Found asar at $(which asar)"
+elif npx asar --version &> /dev/null; then
+    ASAR_CMD="npx asar"
+    success "Using npx asar (no install needed)"
 else
-    success "asar already installed at $(which asar)"
+    substep "Installing asar locally (not globally)..."
+    mkdir -p "${WORKDIR}/.npm-local"
+    cd "${WORKDIR}/.npm-local"
+    npm init -y &> /dev/null || true
+    npm install asar 2>&1 | tail -5 || {
+        substep "Local install failed, trying with --prefix..."
+        cd "${WORKDIR}"
+        npm install --prefix "${WORKDIR}/.npm-local" asar 2>&1 | tail -5 || error "Failed to install asar"
+    }
+    ASAR_CMD="${WORKDIR}/.npm-local/node_modules/.bin/asar"
+    cd "${WORKDIR}"
+    success "Installed asar locally"
 fi
 
 substep "Extracting ASAR to app_unpacked/..."
 rm -rf app_unpacked
-npx asar extract "${ASAR_PATH}" app_unpacked/ || error "ASAR extraction failed"
+${ASAR_CMD} extract "${ASAR_PATH}" app_unpacked/ || error "ASAR extraction failed"
 
 substep "Extracted contents:"
 ls -la app_unpacked/ | head -15
