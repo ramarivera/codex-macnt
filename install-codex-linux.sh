@@ -235,23 +235,30 @@ echo "   ═══════════════════════�
 TARGET_DIR=""
 BUILD_SUCCESS=false
 
-# Try musl target first
-if cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1; then
-    TARGET_DIR="target/x86_64-unknown-linux-musl/release"
-    BUILD_SUCCESS=true
-    echo ""
-    success "Built with musl (statically linked, most compatible)"
-# Try adding musl target then building
-elif rustup target add x86_64-unknown-linux-musl 2>/dev/null && cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1; then
-    TARGET_DIR="target/x86_64-unknown-linux-musl/release"
-    BUILD_SUCCESS=true
-    echo ""
-    success "Built with musl after adding target"
-# Fallback to native target
+# Try musl target first only when cross-compiler exists.
+if command -v x86_64-linux-musl-gcc >/dev/null 2>&1; then
+    if cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1; then
+        TARGET_DIR="target/x86_64-unknown-linux-musl/release"
+        BUILD_SUCCESS=true
+        echo ""
+        success "Built with musl (statically linked, most compatible)"
+    elif rustup target add x86_64-unknown-linux-musl 2>/dev/null && cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1; then
+        TARGET_DIR="target/x86_64-unknown-linux-musl/release"
+        BUILD_SUCCESS=true
+        echo ""
+        success "Built with musl after adding target"
+    else
+        echo ""
+        substep "Musl build failed; falling back to native x86_64 target..."
+        echo "   ════════════════════════════════════════════════════════════════════════"
+    fi
 else
-    echo ""
-    substep "Musl target failed or not available, trying native x86_64 target..."
+    substep "Musl cross-compiler not found; skipping musl build and using native x86_64 target"
     echo "   ════════════════════════════════════════════════════════════════════════"
+fi
+
+# Fallback to native target when musl path is unavailable or fails.
+if [[ "${BUILD_SUCCESS}" != "true" ]]; then
     if cargo build --release --bin codex 2>&1; then
         TARGET_DIR="target/release"
         BUILD_SUCCESS=true
@@ -295,9 +302,13 @@ else
     substep "Detected Electron ${ELECTRON_VERSION}"
 fi
 
-substep "Attempting best-effort native module rebuild in container..."
-npm rebuild better-sqlite3 2>&1 | tail -20 || substep "Warning: better-sqlite3 rebuild failed in container (will rebuild on host)"
-npm rebuild node-pty 2>&1 | tail -20 || substep "Warning: node-pty rebuild failed in container (will rebuild on host)"
+if [[ "${FORCE_CONTAINER_NATIVE_REBUILD:-0}" == "1" ]]; then
+    substep "FORCE_CONTAINER_NATIVE_REBUILD=1, attempting in-container native rebuild..."
+    npm rebuild better-sqlite3 2>&1 | tail -20 || substep "Warning: better-sqlite3 rebuild failed in container"
+    npm rebuild node-pty 2>&1 | tail -20 || substep "Warning: node-pty rebuild failed in container"
+else
+    substep "Skipping in-container native rebuild; host rebuild in build-docker.sh handles Electron ABI"
+fi
 
 # Step 7: Replace macOS-specific files
 step "7/11" "Replacing macOS components with Linux equivalents"
