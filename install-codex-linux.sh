@@ -130,22 +130,30 @@ ASAR_CMD=""
 if command -v asar &> /dev/null; then
     ASAR_CMD="asar"
     success "Found asar at $(which asar)"
-elif npx asar --version &> /dev/null; then
-    ASAR_CMD="npx asar"
-    success "Using npx asar (no install needed)"
 else
-    substep "Installing asar locally (not globally)..."
+    if ! command -v node &> /dev/null; then
+        error "Node.js is required to extract app.asar"
+    fi
+
+    NODE_MAJOR=$(node -p "process.versions.node.split('.')[0]" 2>/dev/null || echo 0)
+    ASAR_PKG="@electron/asar"
+    if [[ "${NODE_MAJOR}" -lt 22 ]]; then
+        # @electron/asar v4 requires Node >=22.12.0
+        ASAR_PKG="@electron/asar@3.2.13"
+    fi
+
+    substep "Installing ${ASAR_PKG} locally (not globally)..."
     mkdir -p "${WORKDIR}/.npm-local"
     cd "${WORKDIR}/.npm-local"
     npm init -y &> /dev/null || true
-    npm install asar 2>&1 | tail -5 || {
+    npm install "${ASAR_PKG}" 2>&1 | tail -5 || {
         substep "Local install failed, trying with --prefix..."
         cd "${WORKDIR}"
-        npm install --prefix "${WORKDIR}/.npm-local" asar 2>&1 | tail -5 || error "Failed to install asar"
+        npm install --prefix "${WORKDIR}/.npm-local" "${ASAR_PKG}" 2>&1 | tail -5 || error "Failed to install ${ASAR_PKG}"
     }
     ASAR_CMD="${WORKDIR}/.npm-local/node_modules/.bin/asar"
     cd "${WORKDIR}"
-    success "Installed asar locally"
+    success "Installed ${ASAR_PKG} locally"
 fi
 
 substep "Extracting ASAR to app_unpacked/..."

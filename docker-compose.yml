@@ -20,7 +20,7 @@ services:
     
     # Environment variables
     environment:
-      - WORKDIR=/build/codex-work
+      - WORKDIR=/output/work
       - INSTALL_DIR=/output
       - HOME=/build
       - CARGO_BUILD_JOBS=2
@@ -28,14 +28,9 @@ services:
     # Volume mounts
     volumes:
       - ./output:/output
-      - codex-cache:/build/codex-work
     
     # Capabilities for unprivileged DMG extraction
     cap_add:
       - SYS_ADMIN
     security_opt:
       - apparmor:unconfined
-
-volumes:
-  codex-cache:
-    driver: local

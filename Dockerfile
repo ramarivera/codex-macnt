@@ -15,9 +15,6 @@ RUN apt-get update && apt-get install -y \
     dmg2img \
     && rm -rf /var/lib/apt/lists/*
 
-# Install asar globally
-RUN npm install -g asar
-
 # Create working directory
 WORKDIR /build
 
