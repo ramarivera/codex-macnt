@@ -318,6 +318,9 @@ rm -vf native/sparkle.node 2>/dev/null || substep "sparkle.node not found (ok)"
 rm -vrf node_modules/electron-liquid-glass 2>/dev/null || substep "electron-liquid-glass not found (ok)"
 success "Cleaned macOS-specific files"
 
+substep "Creating resources directory..."
+mkdir -p resources
+
 substep "Copying Linux CLI binary..."
 cp -v "${WORKDIR}/codex-src/codex-rs/${TARGET_DIR}/codex" resources/codex
 chmod -v +x resources/codex
