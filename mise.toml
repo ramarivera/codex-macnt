@@ -1,179 +1,444 @@
-# Mise configuration for Codex Linux build environment
+# Mise configuration for Codex Linux AppImage workflow
 
 [tools]
-rust = "1.93.0"
 node = "22"
 jq = "latest"
 
 [env]
-CARGO_BUILD_JOBS = "4"
-CARGO_TARGET_DIR = "{{env.HOME}}/.cache/codex-linux-port/build"
-NODE_ENV = "production"
-ELECTRON_SKIP_BINARY_DOWNLOAD = "1"
-CODEX_VERSION = "260208.1016"
-CODEX_DMG_URL = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 WORKDIR = "{{env.HOME}}/.cache/codex-linux-port"
-INSTALL_DIR = "{{env.HOME}}/.local/bin"
+CODEX_DMG_URL = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+ENABLE_LINUX_UI_POLISH = "1"
+CODEX_GIT_REF = "rust-v0.99.0-alpha.16"
 
-[tasks.deps]
-description = "Verify all dependencies"
-run = "echo '=== Dependencies ===' && rustc --version && cargo --version && node --version && npm --version && git --version && which 7z"
+[tasks."codex:docker-build"]
+description = "Build codex-builder Docker image"
+run = "docker build -t codex-builder {{config_root}}"
 
-[tasks.install-system-deps]
-description = "Install 7z and build tools"
+[tasks."codex:docker-run"]
+description = "Run extraction and Rust build in container"
+depends = ["codex:docker-build"]
 run = """
-if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update -qq && sudo apt-get install -y p7zip-full build-essential libssl-dev pkg-config
-elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y p7zip p7zip-plugins gcc gcc-c++ openssl-devel pkgconfig
-elif command -v pacman >/dev/null 2>&1; then
-    sudo pacman -S --noconfirm p7zip base-devel openssl pkgconf
-elif command -v brew >/dev/null 2>&1; then
-    brew install p7zip
-else
-    echo '⚠️ Could not auto-install p7zip. Please install it manually.'
-fi
-"""
+set -euo pipefail
+docker_output_dir="{{env.WORKDIR}}/docker-output"
+rm -rf "$docker_output_dir"
+mkdir -p "$docker_output_dir"
 
-[tasks.download]
-description = "Download Codex macOS DMG"
-run = """
-mkdir -p {{env.WORKDIR}}
-cd {{env.WORKDIR}}
+docker run --rm \
+  --entrypoint bash \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  -e WORKDIR=/output/work \
+  -e CODEX_DMG_URL="{{env.CODEX_DMG_URL}}" \
+  -e ENABLE_LINUX_UI_POLISH="{{env.ENABLE_LINUX_UI_POLISH}}" \
+  -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
+  -v "$docker_output_dir:/output" \
+  codex-builder -c '
+set -euo pipefail
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+
 if [ ! -f Codex.dmg ]; then
-    echo 'Downloading Codex {{env.CODEX_VERSION}}...'
-    curl -L -o Codex.dmg '{{env.CODEX_DMG_URL}}' || wget -O Codex.dmg '{{env.CODEX_DMG_URL}}'
-else
-    echo 'Using cached Codex.dmg'
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --output Codex.dmg "$CODEX_DMG_URL"
+  else
+    wget -O Codex.dmg "$CODEX_DMG_URL"
+  fi
 fi
-ls -lh Codex.dmg
-"""
 
-[tasks.extract]
-description = "Extract DMG and ASAR"
-depends = ["download"]
-run = """
-cd {{env.WORKDIR}}
+rm -f Codex.img
+dmg2img Codex.dmg Codex.img
+
 rm -rf extracted app_unpacked
 mkdir -p extracted
-echo 'Extracting DMG...'
-7z x Codex.dmg -oextracted/ -y
-ASAR_PATH=$(find extracted -name 'app.asar' -type f | head -1)
-echo "ASAR: $ASAR_PATH"
-npm install --prefix {{env.WORKDIR}}/.npm-local asar
-{{env.WORKDIR}}/.npm-local/node_modules/.bin/asar extract "$ASAR_PATH" app_unpacked/
-ls -la app_unpacked/
-"""
+7z x Codex.img -oextracted/ -y >/dev/null || true
 
-[tasks.clone-codex]
-description = "Clone openai/codex repo"
-run = """
-cd {{env.WORKDIR}}
-if [ ! -d codex-src ]; then
-    git clone --depth 1 https://github.com/openai/codex.git codex-src
+ASAR_PATH=$(find extracted -name app.asar -type f | head -1)
+if [ -z "$ASAR_PATH" ]; then
+  echo "Could not locate app.asar" >&2
+  exit 1
+fi
+
+NODE_MAJOR=$(node -v | sed -E "s/^v([0-9]+).*/\\1/")
+ASAR_PKG="@electron/asar"
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  ASAR_PKG="@electron/asar@3.2.13"
+fi
+
+mkdir -p .npm-local
+npm init -y --prefix .npm-local >/dev/null 2>&1 || true
+npm install --prefix .npm-local "$ASAR_PKG" >/dev/null
+.npm-local/node_modules/.bin/asar extract "$ASAR_PATH" app_unpacked/
+
+rm -rf codex-src
+git clone https://github.com/openai/codex.git codex-src >/dev/null
+
+cd codex-src
+if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
+  git fetch --tags --force >/dev/null 2>&1 || true
+  SELECTED_TAG=""
+  for tag in $(git tag --sort=-v:refname | head -n 200); do
+    git checkout --detach "$tag" >/dev/null 2>&1 || continue
+    if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+      SELECTED_TAG="$tag"
+      break
+    fi
+  done
+  if [ -z "$SELECTED_TAG" ]; then
+    git checkout --detach HEAD >/dev/null 2>&1
+    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || {
+      echo "No buildable codex ref found" >&2
+      exit 1
+    }
+  fi
 else
-    cd codex-src && git pull --depth 1
+  git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
+  git checkout --detach FETCH_HEAD >/dev/null
+  if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+    echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
+    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps
+    exit 1
+  fi
 fi
-"""
 
-[tasks.build-rust]
-description = "Build Rust CLI (10-15 min)"
-depends = ["clone-codex"]
-run = """
-cd {{env.WORKDIR}}/codex-src/codex-rs
-echo 'Building codex CLI...'
+cd codex-rs
 cargo build --release --bin codex
-ls -lh target/release/codex
-file target/release/codex
-"""
+cargo build --release --bin codex-linux-sandbox || true
 
-[tasks.build-sandbox]
-description = "Build Linux sandbox helper"
-depends = ["clone-codex"]
-run = """
-cd {{env.WORKDIR}}/codex-src/codex-rs
-cargo build --release --bin codex-linux-sandbox || echo 'Sandbox build failed (optional)'
-ls -lh target/release/codex-linux-sandbox 2>/dev/null || true
-"""
-
-[tasks.rebuild-native]
-description = "Rebuild native Node modules"
-depends = ["extract"]
-run = """
-cd {{env.WORKDIR}}/app_unpacked
-if [ -f node_modules/better-sqlite3/build/Release/better_sqlite3.node ]; then
-    npm rebuild better-sqlite3 || true
-fi
-if [ -f node_modules/node-pty/build/Release/pty.node ]; then
-    npm rebuild node-pty || true
-fi
-"""
-
-[tasks.assemble]
-description = "Assemble Linux app bundle"
-depends = ["build-rust", "build-sandbox", "rebuild-native"]
-run = """
-cd {{env.WORKDIR}}/app_unpacked
+cd "$WORKDIR/app_unpacked"
 rm -f native/sparkle.node
 rm -rf node_modules/electron-liquid-glass
-cp {{env.WORKDIR}}/codex-src/codex-rs/target/release/codex resources/codex
+
+mkdir -p resources resources/bin
+cp "$WORKDIR/codex-src/codex-rs/target/release/codex" resources/codex
 chmod +x resources/codex
-cp {{env.WORKDIR}}/codex-src/codex-rs/target/release/codex-linux-sandbox resources/ 2>/dev/null || true
-cp {{config_root}}/codex-linux.sh.template codex-linux.sh
+cp resources/codex resources/bin/codex
+chmod +x resources/bin/codex
+
+if [ -f "$WORKDIR/codex-src/codex-rs/target/release/codex-linux-sandbox" ]; then
+  cp "$WORKDIR/codex-src/codex-rs/target/release/codex-linux-sandbox" resources/
+  chmod +x resources/codex-linux-sandbox
+fi
+
+if [ "$ENABLE_LINUX_UI_POLISH" = "1" ]; then
+  cat > webview/assets/linux-polish.css <<"CSS"
+:root {
+  --linux-glass-bg: color-mix(in srgb, Canvas 78%, transparent);
+  --linux-glass-bg-strong: color-mix(in srgb, Canvas 86%, transparent);
+  --linux-glass-border: color-mix(in srgb, CanvasText 14%, transparent);
+  --linux-glass-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  --linux-glass-radius: 12px;
+}
+html, body, #root {
+  background: radial-gradient(1200px 700px at 10% -10%, rgba(80, 120, 255, 0.08), transparent 60%),
+              radial-gradient(900px 500px at 90% 0%, rgba(0, 200, 170, 0.07), transparent 55%);
+}
+nav, aside, [role="navigation"], [class*="sidebar" i], [class*="thread" i], [class*="panel" i], [class*="toolbar" i], [class*="header" i] {
+  background-color: var(--linux-glass-bg);
+  border-color: var(--linux-glass-border) !important;
+}
+[class*="card" i], [class*="surface" i], [class*="composer" i], input, textarea, button { border-radius: var(--linux-glass-radius); }
+@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  nav, aside, [role="navigation"], [class*="sidebar" i], [class*="thread" i], [class*="panel" i], [class*="toolbar" i], [class*="header" i] {
+    -webkit-backdrop-filter: saturate(1.2) blur(14px);
+    backdrop-filter: saturate(1.2) blur(14px);
+    box-shadow: var(--linux-glass-shadow);
+  }
+}
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  nav, aside, [role="navigation"], [class*="sidebar" i], [class*="thread" i], [class*="panel" i], [class*="toolbar" i], [class*="header" i] {
+    background-color: var(--linux-glass-bg-strong);
+  }
+}
+* { scrollbar-width: thin; }
+CSS
+  if ! grep -q "linux-polish.css" webview/index.html; then
+    tmp_index=$(mktemp)
+    printf "%s\n" "<link rel=\"stylesheet\" href=\"./assets/linux-polish.css\">" > "$tmp_index"
+    cat webview/index.html >> "$tmp_index"
+    mv "$tmp_index" webview/index.html
+  fi
+fi
+
+cat > codex-linux.sh <<"LAUNCHER"
+#!/bin/sh
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATH="${APP_DIR}/resources:${APP_DIR}/resources/bin:${PATH}"
+export CODEX_CLI_PATH="${APP_DIR}/resources/bin/codex"
+
+if [ ! -f "${CODEX_CLI_PATH}" ]; then
+  echo "codex binary not found at ${CODEX_CLI_PATH}" >&2
+  exit 1
+fi
+
+if command -v electron >/dev/null 2>&1; then
+  exec electron "${APP_DIR}" "$@"
+fi
+
+echo "Electron not installed. Run CLI: ${CODEX_CLI_PATH}" >&2
+exit 1
+LAUNCHER
 chmod +x codex-linux.sh
-echo "✅ Assembled at {{env.WORKDIR}}/app_unpacked/"
+'
 """
 
-[tasks.install-cli]
-description = "Install CLI to PATH"
-depends = ["assemble"]
+[tasks."codex:prepare-bundle"]
+description = "Copy built bundle to stable cache path"
+depends = ["codex:docker-run"]
 run = """
-mkdir -p {{env.INSTALL_DIR}}
-cp {{env.WORKDIR}}/app_unpacked/resources/codex {{env.INSTALL_DIR}}/
-chmod +x {{env.INSTALL_DIR}}/codex
-echo "Installed to {{env.INSTALL_DIR}}/codex"
-{{env.INSTALL_DIR}}/codex --version 2>/dev/null || true
+set -euo pipefail
+docker_output_dir="{{env.WORKDIR}}/docker-output"
+bundle_dir="$docker_output_dir/codex-linux"
+
+if [ -d "$docker_output_dir/work/app_unpacked" ]; then
+  rm -rf "$bundle_dir"
+  cp -a "$docker_output_dir/work/app_unpacked" "$bundle_dir"
+fi
+
+if [ ! -d "$bundle_dir" ]; then
+  echo "❌ Missing app bundle after Docker build" >&2
+  exit 1
+fi
 """
 
-[tasks.desktop-entry]
-description = "Create desktop entry"
-depends = ["assemble"]
+[tasks."codex:rebuild-native"]
+description = "Rebuild native modules against host Electron ABI"
+depends = ["codex:prepare-bundle"]
 run = """
-mkdir -p {{env.HOME}}/.local/share/applications
-cat > {{env.HOME}}/.local/share/applications/codex.desktop << 'EOF'
+set -euo pipefail
+app_dir="{{env.WORKDIR}}/docker-output/codex-linux"
+native_build_dir="{{env.WORKDIR}}/native-build-host"
+
+if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+  echo "❌ node and npm are required on host for native module rebuild" >&2
+  exit 1
+fi
+
+pushd "$app_dir" >/dev/null
+package_electron_version=$(node -p "require('./package.json').devDependencies?.electron || ''" 2>/dev/null || true)
+package_electron_version="${package_electron_version#^}"
+
+host_electron_version=""
+if command -v electron >/dev/null 2>&1; then
+  host_electron_version=$(electron --version 2>/dev/null || true)
+  host_electron_version="${host_electron_version#v}"
+  host_electron_version="${host_electron_version#^}"
+fi
+
+electron_version="${host_electron_version:-${package_electron_version}}"
+if [ -z "$electron_version" ]; then
+  echo "❌ Unable to determine Electron version for native rebuild" >&2
+  exit 1
+fi
+
+sqlite_version=$(node -p "require('./node_modules/better-sqlite3/package.json').version" 2>/dev/null || echo "12.5.0")
+pty_version=$(node -p "require('./node_modules/node-pty/package.json').version" 2>/dev/null || echo "1.1.0")
+popd >/dev/null
+
+rm -rf "$native_build_dir"
+mkdir -p "$native_build_dir"
+pushd "$native_build_dir" >/dev/null
+npm init -y >/dev/null 2>&1
+
+npm_config_runtime=electron \
+npm_config_target="$electron_version" \
+npm_config_disturl=https://electronjs.org/headers \
+npm install --force --no-save "better-sqlite3@${sqlite_version}" "node-pty@${pty_version}" >/dev/null
+
+popd >/dev/null
+
+mkdir -p "$app_dir/node_modules/better-sqlite3/build/Release"
+mkdir -p "$app_dir/node_modules/node-pty/build/Release"
+cp -f "$native_build_dir/node_modules/better-sqlite3/build/Release/better_sqlite3.node" "$app_dir/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+cp -f "$native_build_dir/node_modules/node-pty/build/Release/pty.node" "$app_dir/node_modules/node-pty/build/Release/pty.node"
+
+file "$app_dir/node_modules/better-sqlite3/build/Release/better_sqlite3.node" | grep -q ELF
+file "$app_dir/node_modules/node-pty/build/Release/pty.node" | grep -q ELF
+
+if ldd "$app_dir/node_modules/better-sqlite3/build/Release/better_sqlite3.node" | grep -q libnode; then
+  echo "❌ better-sqlite3 still links libnode" >&2
+  exit 1
+fi
+
+if ldd "$app_dir/node_modules/node-pty/build/Release/pty.node" | grep -q libnode; then
+  echo "❌ node-pty still links libnode" >&2
+  exit 1
+fi
+"""
+
+[tasks."codex:package-appimage"]
+description = "Package Codex.AppImage into repo root"
+depends = ["codex:rebuild-native"]
+run = """
+set -euo pipefail
+bundle_dir="{{env.WORKDIR}}/docker-output/codex-linux"
+output_path="{{config_root}}/Codex.AppImage"
+
+if [ ! -d "$bundle_dir" ]; then
+  echo "❌ App bundle not found at $bundle_dir" >&2
+  exit 1
+fi
+
+tempdir=$(mktemp -d)
+appdir="$tempdir/Codex.AppDir"
+mkdir -p "$appdir/usr/share/codex" "$appdir/usr/bin"
+
+cp -a "$bundle_dir"/. "$appdir/usr/share/codex/"
+cp -f "$appdir/usr/share/codex/resources/bin/codex" "$appdir/usr/bin/codex"
+chmod +x "$appdir/usr/bin/codex"
+
+cat > "$appdir/AppRun" <<"EOF"
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+APP_DIR="${HERE}/usr/share/codex"
+export PATH="${APP_DIR}/resources:${APP_DIR}/resources/bin:${PATH}"
+export CODEX_CLI_PATH="${APP_DIR}/resources/bin/codex"
+
+if [ "${1:-}" = "--cli" ]; then
+  shift
+  exec "${CODEX_CLI_PATH}" "$@"
+fi
+
+if command -v electron >/dev/null 2>&1; then
+  exec electron "${APP_DIR}" "$@"
+fi
+
+echo "Electron not found on host."
+echo "Run CLI mode with: ./Codex.AppImage --cli --help"
+exit 1
+EOF
+chmod +x "$appdir/AppRun"
+
+cat > "$appdir/codex.desktop" <<"EOF"
 [Desktop Entry]
 Name=Codex
-Comment=OpenAI Codex AI coding assistant
-Exec={{env.WORKDIR}}/app_unpacked/codex-linux.sh
-Icon={{env.WORKDIR}}/app_unpacked/webview/assets/logo-BtOb2qkB.png
-Type=Application
-Categories=Development;IDE;
+GenericName=AI Coding Assistant
+Comment=OpenAI Codex - AI-powered coding assistant
+Exec=AppRun
+Icon=codex
 Terminal=false
+Type=Application
+Categories=Development;IDE;TextEditor;
+Keywords=codex;ai;code;editor;openai;
 EOF
-chmod +x {{env.HOME}}/.local/share/applications/codex.desktop
-echo "Desktop entry created"
+
+icon_src=$(ls "$appdir"/usr/share/codex/webview/assets/logo-* 2>/dev/null | head -1 || true)
+if [ -z "$icon_src" ]; then
+  echo "❌ Could not find Codex icon in bundle" >&2
+  exit 1
+fi
+cp -f "$icon_src" "$appdir/codex.png"
+
+tools_dir="{{env.WORKDIR}}/tools"
+appimagetool="$tools_dir/appimagetool.AppImage"
+mkdir -p "$tools_dir"
+
+if [ ! -x "$appimagetool" ]; then
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$appimagetool" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+  else
+    wget -qO "$appimagetool" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+  fi
+  chmod +x "$appimagetool"
+fi
+
+rm -f "$output_path"
+ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "$appimagetool" "$appdir" "$output_path" >/dev/null
+chmod +x "$output_path"
+rm -rf "$tempdir"
 """
 
-[tasks.full-build]
-description = "Complete build"
-depends = ["install-system-deps", "deps", "download", "extract", "clone-codex", "build-rust", "build-sandbox", "rebuild-native", "assemble", "install-cli", "desktop-entry"]
+[tasks."codex:versions"]
+description = "Update versions.json from generated AppImage"
+depends = ["codex:package-appimage"]
 run = """
-echo ''
-echo '══════════════════════════════════════════════════════════════'
-echo '                ✅ BUILD COMPLETE!'
-echo '══════════════════════════════════════════════════════════════'
-echo ''
-echo '📦 App:  {{env.WORKDIR}}/app_unpacked/'
-echo '🔧 CLI: {{env.INSTALL_DIR}}/codex'
-echo '🖥️  GUI: {{env.HOME}}/.local/share/applications/codex.desktop'
-echo ''
-echo 'Usage: codex --help | codex login | codex-linux.sh'
-echo '══════════════════════════════════════════════════════════════'
+set -euo pipefail
+appimage_path="{{config_root}}/Codex.AppImage"
+versions_file="{{config_root}}/versions.json"
+
+if [ ! -x "$appimage_path" ]; then
+  echo "❌ AppImage not found at $appimage_path" >&2
+  exit 1
+fi
+
+cli_version_output="$($appimage_path --cli --version)"
+cli_version="$(awk '{print $2}' <<<"$cli_version_output")"
+if [ -z "$cli_version" ]; then
+  echo "❌ Failed to parse CLI version" >&2
+  exit 1
+fi
+
+tmp=$(mktemp -d)
+cp "$appimage_path" "$tmp/Codex.AppImage"
+(cd "$tmp" && ./Codex.AppImage --appimage-extract >/dev/null 2>&1)
+app_version="$(node -p "require('$tmp/squashfs-root/usr/share/codex/package.json').version" 2>/dev/null || true)"
+rm -rf "$tmp"
+
+if [ -z "$app_version" ]; then
+  echo "❌ Failed to parse app version" >&2
+  exit 1
+fi
+
+cat > "$versions_file" <<EOF
+{
+  "app": "$app_version",
+  "cli": "$cli_version"
+}
+EOF
 """
 
-[tasks.clean]
-description = "Clean build cache"
-run = "rm -rf {{env.WORKDIR}} && echo 'Cleaned {{env.WORKDIR}}'"
+[tasks."codex:release"]
+description = "Build AppImage and publish/update GitHub release"
+depends = ["codex:build"]
+run = """
+set -euo pipefail
+appimage_path="{{config_root}}/Codex.AppImage"
+versions_file="{{config_root}}/versions.json"
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "❌ GitHub CLI (gh) not found" >&2
+  exit 1
+fi
+
+gh auth status >/dev/null 2>&1 || {
+  echo "❌ gh is not authenticated. Run: gh auth login" >&2
+  exit 1
+}
+
+app_version="$(jq -r '.app' "$versions_file")"
+cli_version="$(jq -r '.cli' "$versions_file")"
+
+if [ -z "$app_version" ] || [ "$app_version" = "null" ]; then
+  echo "❌ Invalid app version in $versions_file" >&2
+  exit 1
+fi
+
+tag="v$app_version"
+title="Codex AppImage $app_version"
+notes="Automated AppImage release for Codex app $app_version (CLI $cli_version)."
+
+if gh release view "$tag" >/dev/null 2>&1; then
+  gh release upload "$tag" "$appimage_path" --clobber
+  gh release edit "$tag" --title "$title" --notes "$notes"
+else
+  gh release create "$tag" "$appimage_path" --title "$title" --notes "$notes"
+fi
+"""
+
+[tasks."codex:cleanup"]
+description = "Remove temporary build cache directories"
+run = "rm -rf {{env.WORKDIR}}/docker-output {{env.WORKDIR}}/native-build-host"
+
+[tasks."codex:build"]
+description = "Build Codex AppImage end-to-end"
+depends = ["codex:versions"]
+run = """
+echo ""
+echo "✅ Build complete!"
+echo "📦 AppImage: {{config_root}}/Codex.AppImage"
+echo "📄 Versions: {{config_root}}/versions.json"
+echo "Run GUI: {{config_root}}/Codex.AppImage"
+echo "Run CLI: {{config_root}}/Codex.AppImage --cli --help"
+"""
 
 [settings]
 jobs = 4

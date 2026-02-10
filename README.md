@@ -2,21 +2,22 @@
 
 Build a Linux runnable Codex package from the official macOS DMG.
 
-This repo is intentionally minimal and uses one orchestration script: `install-codex-linux.sh`.
+This repo is intentionally minimal and orchestration runs through `mise` tasks (`codex:*`).
 
 ## Requirements
 
+- `mise`
 - Docker (or Podman with Docker CLI compatibility)
-- `node` and `npm` on the host (used for native module rebuild)
-- `curl` or `wget` (to download AppImage tooling)
 - Optional for GUI runtime: `electron` on host (`npm install -g electron`)
+
+`mise` installs/activates the required toolchain for the tasks (for example `node` and `jq`), so no separate manual Node setup is required.
 
 ## Build
 
-From the same directory as `install-codex-linux.sh`:
+Build (full pipeline):
 
 ```nu
-./install-codex-linux.sh
+mise run codex:build
 ```
 
 What the script does:
@@ -26,6 +27,18 @@ What the script does:
 3. Builds the Rust CLI in container.
 4. Rebuilds native Node modules on host for Electron ABI compatibility.
 5. Packages a single `Codex.AppImage` in this directory.
+6. Writes `versions.json` with app and CLI versions.
+
+## Build tasks
+
+- `mise run codex:docker-build`
+- `mise run codex:docker-run`
+- `mise run codex:prepare-bundle`
+- `mise run codex:rebuild-native`
+- `mise run codex:package-appimage`
+- `mise run codex:versions`
+- `mise run codex:build` (full pipeline)
+- `mise run codex:release` (full build + GitHub release)
 
 ## Output
 
@@ -54,16 +67,16 @@ CLI mode through AppImage:
 Disable Linux UI polish during build:
 
 ```nu
-with-env { ENABLE_LINUX_UI_POLISH: "0" } { ./install-codex-linux.sh }
+with-env { ENABLE_LINUX_UI_POLISH: "0" } { mise run codex:build }
 ```
 
 Force a specific `openai/codex` ref (branch/tag/commit):
 
 ```nu
-with-env { CODEX_GIT_REF: "main" } { ./install-codex-linux.sh }
+with-env { CODEX_GIT_REF: "main" } { mise run codex:build }
 ```
 
-Default behavior is `CODEX_GIT_REF=latest-tag`, which selects the newest buildable tag.
+Default behavior is a pinned known-good ref (`rust-v0.99.0-alpha.16`). Override with `CODEX_GIT_REF` if you want another ref.
 
 ## Troubleshooting
 
@@ -73,7 +86,7 @@ Default behavior is `CODEX_GIT_REF=latest-tag`, which selects the newest buildab
 
 ## Release automation
 
-Use `scripts/release-appimage.sh` to:
+Use `mise run codex:release` to:
 
 1. Build `Codex.AppImage`.
 2. Detect app version from AppImage package metadata.
@@ -84,7 +97,7 @@ Use `scripts/release-appimage.sh` to:
 Run:
 
 ```nu
-./scripts/release-appimage.sh
+mise run codex:release
 ```
 
 ## Nushell compatibility fallback
@@ -92,8 +105,8 @@ Run:
 If you use Bash/Zsh, equivalent env-var syntax is:
 
 ```bash
-ENABLE_LINUX_UI_POLISH=0 ./install-codex-linux.sh
-CODEX_GIT_REF=main ./install-codex-linux.sh
+ENABLE_LINUX_UI_POLISH=0 mise run codex:build
+CODEX_GIT_REF=main mise run codex:build
 ```
 
 ## Disclaimer

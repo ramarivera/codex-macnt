@@ -48,10 +48,8 @@ This repository ports OpenAI's Codex (macOS-only desktop app) to Linux by:
 
 | File | Purpose |
 |------|---------|
-| `install-codex-linux.sh` | Main installation script (runs on host) |
-| `mise.toml` | Dependency management with mise |
+| `mise.toml` | Main build/release orchestration via `codex:*` tasks |
 | `Dockerfile` | Container environment (optional) |
-| `reverse_analysis/` | Documentation of findings |
 
 ## Common Issues
 
