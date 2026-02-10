@@ -192,6 +192,30 @@ fi
 RUST_VERSION=$(rustc --version)
 success "Found Rust: ${RUST_VERSION}"
 
+# Check if we need to upgrade Rust
+substep "Checking Rust version compatibility..."
+CURRENT_RUST=$(rustc --version | grep -oP '\d+\.\d+\.\d+')
+REQUIRED_RUST="1.91.0"
+
+# Simple version compare
+if [[ "$(printf '%s\n' "$REQUIRED_RUST" "$CURRENT_RUST" | sort -V | head -n1)" != "$REQUIRED_RUST" ]]; then
+    substep "⚠️  Rust ${CURRENT_RUST} is older than required ${REQUIRED_RUST}"
+    substep "Upgrading Rust to latest stable..."
+    
+    if command -v rustup &> /dev/null; then
+        rustup update stable 2>&1 || {
+            substep "rustup update failed, trying self update..."
+            rustup self update 2>&1 || true
+            rustup update stable 2>&1
+        }
+        success "Upgraded Rust to $(rustc --version)"
+    else
+        error "rustup not found. Cannot auto-upgrade Rust.\nPlease upgrade manually:\n  rustup update stable\nOr visit: https://rustup.rs/"
+    fi
+else
+    success "Rust version ${CURRENT_RUST} meets requirements (>= ${REQUIRED_RUST})"
+fi
+
 substep "Analyzing Cargo workspace..."
 substep "Workspace members:"
 grep -A30 'members = \[' Cargo.toml | head -10
