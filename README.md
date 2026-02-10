@@ -32,8 +32,7 @@ What the script does:
 After success, you get exactly one distributable artifact here:
 
 - `./Codex.AppImage`
-- `./CODEX_APP_VERSION` (app package version from Codex bundle)
-- `./CODEX_CLI_VERSION` (embedded CLI version)
+- `./versions.json` (tracks `app` and `cli` versions)
 
 ## Run
 
@@ -79,7 +78,7 @@ Use `scripts/release-appimage.sh` to:
 1. Build `Codex.AppImage`.
 2. Detect app version from AppImage package metadata.
 3. Detect CLI version via `./Codex.AppImage --cli --version`.
-4. Update `CODEX_APP_VERSION` and `CODEX_CLI_VERSION`.
+4. Update `versions.json` with both versions.
 5. Create or update a GitHub release with `gh` using tag `v<app-version>`.
 
 Run:

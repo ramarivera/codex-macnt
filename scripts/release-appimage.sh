@@ -5,8 +5,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APPIMAGE_PATH="${REPO_DIR}/Codex.AppImage"
-VERSION_FILE="${REPO_DIR}/CODEX_CLI_VERSION"
-APP_VERSION_FILE="${REPO_DIR}/CODEX_APP_VERSION"
+VERSIONS_FILE="${REPO_DIR}/versions.json"
 
 echo "==> Building Codex AppImage"
 "${REPO_DIR}/install-codex-linux.sh"
@@ -24,9 +23,6 @@ if [[ -z "${version}" ]]; then
   echo "❌ Failed to parse version from: ${version_output}" >&2
   exit 1
 fi
-
-printf '%s\n' "${version}" > "${VERSION_FILE}"
-echo "Version written to ${VERSION_FILE}: ${version}"
 
 echo "==> Detecting app version"
 if ! command -v node >/dev/null 2>&1; then
@@ -49,8 +45,13 @@ if [[ -z "${app_version}" ]]; then
   exit 1
 fi
 
-printf '%s\n' "${app_version}" > "${APP_VERSION_FILE}"
-echo "Version written to ${APP_VERSION_FILE}: ${app_version}"
+cat > "${VERSIONS_FILE}" <<EOF
+{
+  "app": "${app_version}",
+  "cli": "${version}"
+}
+EOF
+echo "Versions written to ${VERSIONS_FILE}: app=${app_version}, cli=${version}"
 
 if ! command -v gh >/dev/null 2>&1; then
   echo "❌ GitHub CLI (gh) not found" >&2
