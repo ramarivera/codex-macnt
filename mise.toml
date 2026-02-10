@@ -1,216 +1,179 @@
 # Mise configuration for Codex Linux build environment
-# This sets up all dependencies needed to build Codex from macOS to Linux
 
 [tools]
-# Core build tools
-rust = "1.93.0"  # Latest stable with required rama-* crate support
-node = "22"      # LTS version for Electron/native modules
-
-# System tools via aqua backend (GitHub releases with security verification)
-# These mise can install automatically
+rust = "1.93.0"
+node = "22"
 jq = "latest"
-# Note: git, curl, wget are usually pre-installed on most systems
-# but mise could install them via asdf/aqua if needed
 
 [env]
-# Build configuration
 CARGO_BUILD_JOBS = "4"
 CARGO_TARGET_DIR = "{{env.HOME}}/.cache/codex-linux-port/build"
 NODE_ENV = "production"
 ELECTRON_SKIP_BINARY_DOWNLOAD = "1"
-
-# Codex specific
 CODEX_VERSION = "260208.1016"
 CODEX_DMG_URL = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 WORKDIR = "{{env.HOME}}/.cache/codex-linux-port"
+INSTALL_DIR = "{{env.HOME}}/.local/bin"
 
 [tasks.deps]
-description = "Install all dependencies and verify environment"
-run = [
-    "echo '=== Checking build dependencies ==='",
-    "rustc --version",
-    "cargo --version", 
-    "node --version",
-    "npm --version",
-    "git --version",
-    "which 7z || echo '⚠️  7z not found - will try to install'",
-    "echo '=== All dependencies ready ==='"
-]
+description = "Verify all dependencies"
+run = "echo '=== Dependencies ===' && rustc --version && cargo --version && node --version && npm --version && git --version && which 7z"
 
 [tasks.install-system-deps]
-description = "Install system packages (7z, build essentials)"
-# This runs platform-specific commands
-run = [
-    "echo 'Installing system dependencies...'",
-    "if command -v apt-get >/dev/null 2>&1; then",
-    "    sudo apt-get update -qq && sudo apt-get install -y p7zip-full build-essential libssl-dev pkg-config",
-    "elif command -v yum >/dev/null 2>&1; then",
-    "    sudo yum install -y p7zip p7zip-plugins gcc gcc-c++ openssl-devel pkgconfig",
-    "elif command -v pacman >/dev/null 2>&1; then",
-    "    sudo pacman -S --noconfirm p7zip base-devel openssl pkgconf",
-    "elif command -v brew >/dev/null 2>&1; then",
-    "    brew install p7zip",
-    "else",
-    "    echo '⚠️  Could not auto-install system deps. Please install p7zip manually'",
-    "fi"
-]
+description = "Install 7z and build tools"
+run = """
+if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -qq && sudo apt-get install -y p7zip-full build-essential libssl-dev pkg-config
+elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y p7zip p7zip-plugins gcc gcc-c++ openssl-devel pkgconfig
+elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -S --noconfirm p7zip base-devel openssl pkgconf
+elif command -v brew >/dev/null 2>&1; then
+    brew install p7zip
+else
+    echo '⚠️ Could not auto-install p7zip. Please install it manually.'
+fi
+"""
 
 [tasks.download]
 description = "Download Codex macOS DMG"
-run = [
-    "mkdir -p {{env.WORKDIR}}",
-    "cd {{env.WORKDIR}}",
-    "if [ ! -f Codex.dmg ]; then",
-    "    echo 'Downloading Codex {{env.CODEX_VERSION}}...'",
-    "    curl -L -o Codex.dmg '{{env.CODEX_DMG_URL}}' || wget -O Codex.dmg '{{env.CODEX_DMG_URL}}'",
-    "else",
-    "    echo 'Using cached Codex.dmg'",
-    "fi",
-    "ls -lh Codex.dmg"
-]
+run = """
+mkdir -p {{env.WORKDIR}}
+cd {{env.WORKDIR}}
+if [ ! -f Codex.dmg ]; then
+    echo 'Downloading Codex {{env.CODEX_VERSION}}...'
+    curl -L -o Codex.dmg '{{env.CODEX_DMG_URL}}' || wget -O Codex.dmg '{{env.CODEX_DMG_URL}}'
+else
+    echo 'Using cached Codex.dmg'
+fi
+ls -lh Codex.dmg
+"""
 
 [tasks.extract]
-description = "Extract DMG and ASAR contents"
+description = "Extract DMG and ASAR"
 depends = ["download"]
-run = [
-    "cd {{env.WORKDIR}}",
-    "rm -rf extracted app_unpacked",
-    "mkdir -p extracted",
-    "echo 'Extracting DMG with 7z...'",
-    "7z x Codex.dmg -oextracted/ -y",
-    "ASAR_PATH=$(find extracted -name 'app.asar' -type f | head -1)",
-    "echo 'Extracting ASAR: $ASAR_PATH'",
-    "npm install --prefix {{env.WORKDIR}}/.npm-local asar",
-    "{{env.WORKDIR}}/.npm-local/node_modules/.bin/asar extract '$ASAR_PATH' app_unpacked/",
-    "echo 'Extracted app_unpacked contents:'",
-    "ls -la app_unpacked/"
-]
+run = """
+cd {{env.WORKDIR}}
+rm -rf extracted app_unpacked
+mkdir -p extracted
+echo 'Extracting DMG...'
+7z x Codex.dmg -oextracted/ -y
+ASAR_PATH=$(find extracted -name 'app.asar' -type f | head -1)
+echo "ASAR: $ASAR_PATH"
+npm install --prefix {{env.WORKDIR}}/.npm-local asar
+{{env.WORKDIR}}/.npm-local/node_modules/.bin/asar extract "$ASAR_PATH" app_unpacked/
+ls -la app_unpacked/
+"""
 
 [tasks.clone-codex]
-description = "Clone OpenAI codex repository"
-run = [
-    "cd {{env.WORKDIR}}",
-    "if [ ! -d codex-src ]; then",
-    "    git clone --depth 1 https://github.com/openai/codex.git codex-src",
-    "else",
-    "    cd codex-src && git pull --depth 1",
-    "fi"
-]
+description = "Clone openai/codex repo"
+run = """
+cd {{env.WORKDIR}}
+if [ ! -d codex-src ]; then
+    git clone --depth 1 https://github.com/openai/codex.git codex-src
+else
+    cd codex-src && git pull --depth 1
+fi
+"""
 
 [tasks.build-rust]
-description = "Build Rust CLI core for Linux"
+description = "Build Rust CLI (10-15 min)"
 depends = ["clone-codex"]
-run = [
-    "cd {{env.WORKDIR}}/codex-src/codex-rs",
-    "echo 'Building codex CLI (this takes 10-15 minutes)...'",
-    "cargo build --release --bin codex",
-    "echo 'Build complete:'",
-    "ls -lh target/release/codex",
-    "file target/release/codex"
-]
+run = """
+cd {{env.WORKDIR}}/codex-src/codex-rs
+echo 'Building codex CLI...'
+cargo build --release --bin codex
+ls -lh target/release/codex
+file target/release/codex
+"""
 
 [tasks.build-sandbox]
 description = "Build Linux sandbox helper"
 depends = ["clone-codex"]
-run = [
-    "cd {{env.WORKDIR}}/codex-src/codex-rs",
-    "echo 'Building Linux sandbox helper...'",
-    "cargo build --release --bin codex-linux-sandbox || echo 'Sandbox build failed (optional)'",
-    "ls -lh target/release/codex-linux-sandbox 2>/dev/null || true"
-]
+run = """
+cd {{env.WORKDIR}}/codex-src/codex-rs
+cargo build --release --bin codex-linux-sandbox || echo 'Sandbox build failed (optional)'
+ls -lh target/release/codex-linux-sandbox 2>/dev/null || true
+"""
 
 [tasks.rebuild-native]
-description = "Rebuild native Node modules for Linux"
+description = "Rebuild native Node modules"
 depends = ["extract"]
-run = [
-    "cd {{env.WORKDIR}}/app_unpacked",
-    "if [ -f node_modules/better-sqlite3/build/Release/better_sqlite3.node ]; then",
-    "    echo 'Rebuilding better-sqlite3...'",
-    "    npm rebuild better-sqlite3 || true",
-    "fi",
-    "if [ -f node_modules/node-pty/build/Release/pty.node ]; then",
-    "    echo 'Rebuilding node-pty...'",
-    "    npm rebuild node-pty || true",
-    "fi"
-]
+run = """
+cd {{env.WORKDIR}}/app_unpacked
+if [ -f node_modules/better-sqlite3/build/Release/better_sqlite3.node ]; then
+    npm rebuild better-sqlite3 || true
+fi
+if [ -f node_modules/node-pty/build/Release/pty.node ]; then
+    npm rebuild node-pty || true
+fi
+"""
 
 [tasks.assemble]
-description = "Assemble final Linux app bundle"
+description = "Assemble Linux app bundle"
 depends = ["build-rust", "build-sandbox", "rebuild-native"]
-run = [
-    "cd {{env.WORKDIR}}/app_unpacked",
-    "echo 'Assembling Linux bundle...'",
-    "rm -f native/sparkle.node",
-    "rm -rf node_modules/electron-liquid-glass",
-    "cp {{env.WORKDIR}}/codex-src/codex-rs/target/release/codex resources/codex",
-    "chmod +x resources/codex",
-    "cp {{env.WORKDIR}}/codex-src/codex-rs/target/release/codex-linux-sandbox resources/ 2>/dev/null || true",
-    "chmod +x resources/codex-linux-sandbox 2>/dev/null || true",
-    "cp {{config_root}}/codex-linux.sh.template codex-linux.sh",
-    "chmod +x codex-linux.sh",
-    "echo 'Bundle assembled at {{env.WORKDIR}}/app_unpacked/'",
-    "ls -la"
-]
+run = """
+cd {{env.WORKDIR}}/app_unpacked
+rm -f native/sparkle.node
+rm -rf node_modules/electron-liquid-glass
+cp {{env.WORKDIR}}/codex-src/codex-rs/target/release/codex resources/codex
+chmod +x resources/codex
+cp {{env.WORKDIR}}/codex-src/codex-rs/target/release/codex-linux-sandbox resources/ 2>/dev/null || true
+cp {{config_root}}/codex-linux.sh.template codex-linux.sh
+chmod +x codex-linux.sh
+echo "✅ Assembled at {{env.WORKDIR}}/app_unpacked/"
+"""
 
 [tasks.install-cli]
-description = "Install codex CLI to PATH"
+description = "Install CLI to PATH"
 depends = ["assemble"]
-run = [
-    "mkdir -p {{env.INSTALL_DIR}}",
-    "cp {{env.WORKDIR}}/app_unpacked/resources/codex {{env.INSTALL_DIR}}/",
-    "chmod +x {{env.INSTALL_DIR}}/codex",
-    "echo 'Installed to {{env.INSTALL_DIR}}/codex'",
-    "{{env.INSTALL_DIR}}/codex --version || true"
-]
+run = """
+mkdir -p {{env.INSTALL_DIR}}
+cp {{env.WORKDIR}}/app_unpacked/resources/codex {{env.INSTALL_DIR}}/
+chmod +x {{env.INSTALL_DIR}}/codex
+echo "Installed to {{env.INSTALL_DIR}}/codex"
+{{env.INSTALL_DIR}}/codex --version 2>/dev/null || true
+"""
 
 [tasks.desktop-entry]
-description = "Create desktop application entry"
+description = "Create desktop entry"
 depends = ["assemble"]
-run = [
-    "mkdir -p {{env.HOME}}/.local/share/applications",
-    "cat > {{env.HOME}}/.local/share/applications/codex.desktop << EOF",
-    "[Desktop Entry]",
-    "Name=Codex",
-    "Comment=OpenAI Codex AI coding assistant",
-    "Exec={{env.WORKDIR}}/app_unpacked/codex-linux.sh",
-    "Icon={{env.WORKDIR}}/app_unpacked/webview/assets/logo-BtOb2qkB.png",
-    "Type=Application",
-    "Categories=Development;IDE;",
-    "Terminal=false",
-    "EOF",
-    "chmod +x {{env.HOME}}/.local/share/applications/codex.desktop",
-    "echo 'Desktop entry created'"
-]
+run = """
+mkdir -p {{env.HOME}}/.local/share/applications
+cat > {{env.HOME}}/.local/share/applications/codex.desktop << 'EOF'
+[Desktop Entry]
+Name=Codex
+Comment=OpenAI Codex AI coding assistant
+Exec={{env.WORKDIR}}/app_unpacked/codex-linux.sh
+Icon={{env.WORKDIR}}/app_unpacked/webview/assets/logo-BtOb2qkB.png
+Type=Application
+Categories=Development;IDE;
+Terminal=false
+EOF
+chmod +x {{env.HOME}}/.local/share/applications/codex.desktop
+echo "Desktop entry created"
+"""
 
 [tasks.full-build]
-description = "Complete build from scratch (download → build → install)"
+description = "Complete build"
 depends = ["install-system-deps", "deps", "download", "extract", "clone-codex", "build-rust", "build-sandbox", "rebuild-native", "assemble", "install-cli", "desktop-entry"]
-run = [
-    "echo ''",
-    "echo '══════════════════════════════════════════════════════════════════════════════'",
-    "echo '                    ✅ BUILD COMPLETE!'",
-    "echo '══════════════════════════════════════════════════════════════════════════════'",
-    "echo ''",
-    "echo 'Installation locations:'",
-    "echo '  📦 App bundle:  {{env.WORKDIR}}/app_unpacked/'",
-    "echo '  🔧 CLI binary: {{env.INSTALL_DIR}}/codex'",
-    "echo '  🖥️  Desktop:    {{env.HOME}}/.local/share/applications/codex.desktop'",
-    "echo ''",
-    "echo 'Usage:'",
-    "echo '  codex --help        # CLI help'",
-    "echo '  codex login         # Authenticate'",
-    "echo '  codex-linux.sh      # GUI (requires: npm install -g electron)'",
-    "echo ''",
-    "echo '══════════════════════════════════════════════════════════════════════════════'"
-]
+run = """
+echo ''
+echo '══════════════════════════════════════════════════════════════'
+echo '                ✅ BUILD COMPLETE!'
+echo '══════════════════════════════════════════════════════════════'
+echo ''
+echo '📦 App:  {{env.WORKDIR}}/app_unpacked/'
+echo '🔧 CLI: {{env.INSTALL_DIR}}/codex'
+echo '🖥️  GUI: {{env.HOME}}/.local/share/applications/codex.desktop'
+echo ''
+echo 'Usage: codex --help | codex login | codex-linux.sh'
+echo '══════════════════════════════════════════════════════════════'
+"""
 
 [tasks.clean]
-description = "Clean all build artifacts and cache"
-run = [
-    "rm -rf {{env.WORKDIR}}",
-    "echo 'Cleaned {{env.WORKDIR}}'"
-]
+description = "Clean build cache"
+run = "rm -rf {{env.WORKDIR}} && echo 'Cleaned {{env.WORKDIR}}'"
 
 [settings]
 jobs = 4
-experimental = true
