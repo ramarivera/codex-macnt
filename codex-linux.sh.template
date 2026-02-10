@@ -1,0 +1,12 @@
+#!/bin/bash
+# Codex Linux Launcher - Auto-generated
+
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATH="${APP_DIR}/resources:${PATH}"
+
+if command -v electron &> /dev/null; then
+    exec electron "${APP_DIR}" "$@"
+else
+    echo "Run CLI: ${APP_DIR}/resources/codex"
+    exit 1
+fi
