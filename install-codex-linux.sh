@@ -11,10 +11,97 @@ WORKDIR="${WORKDIR:-${HOME}/.cache/codex-linux-port}"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 LOG_FILE="${WORKDIR}/install.log"
 ENABLE_LINUX_UI_POLISH="${ENABLE_LINUX_UI_POLISH:-1}"
+CODEX_GIT_REF="${CODEX_GIT_REF:-latest-tag}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+create_appimage() {
+    local bundle_dir="$1"
+    local output_path="$2"
+    local appdir tempdir appimagetool tools_dir icon_src
+
+    if [[ ! -d "${bundle_dir}" ]]; then
+        echo "❌ App bundle not found at ${bundle_dir}" >&2
+        exit 1
+    fi
+
+    tempdir=$(mktemp -d)
+    appdir="${tempdir}/Codex.AppDir"
+    mkdir -p "${appdir}/usr/share/codex" "${appdir}/usr/bin"
+
+    cp -a "${bundle_dir}"/. "${appdir}/usr/share/codex/"
+    cp -f "${appdir}/usr/share/codex/resources/bin/codex" "${appdir}/usr/bin/codex"
+    chmod +x "${appdir}/usr/bin/codex"
+
+    cat > "${appdir}/AppRun" << 'APP_RUN_EOF'
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+APP_DIR="${HERE}/usr/share/codex"
+export PATH="${APP_DIR}/resources:${APP_DIR}/resources/bin:${PATH}"
+export CODEX_CLI_PATH="${APP_DIR}/resources/bin/codex"
+
+if [ "${1:-}" = "--cli" ]; then
+  shift
+  exec "${CODEX_CLI_PATH}" "$@"
+fi
+
+if command -v electron >/dev/null 2>&1; then
+  exec electron "${APP_DIR}" "$@"
+fi
+
+echo "Electron not found on host."
+echo "Run CLI mode with: ./Codex.AppImage --cli --help"
+exit 1
+APP_RUN_EOF
+    chmod +x "${appdir}/AppRun"
+
+    cat > "${appdir}/codex.desktop" << 'DESKTOP_EOF'
+[Desktop Entry]
+Name=Codex
+GenericName=AI Coding Assistant
+Comment=OpenAI Codex - AI-powered coding assistant
+Exec=AppRun
+Icon=codex
+Terminal=false
+Type=Application
+Categories=Development;IDE;TextEditor;
+Keywords=codex;ai;code;editor;openai;
+DESKTOP_EOF
+
+    icon_src=$(ls "${appdir}"/usr/share/codex/webview/assets/logo-* 2>/dev/null | head -1 || true)
+    if [[ -n "${icon_src}" ]]; then
+        cp -f "${icon_src}" "${appdir}/codex.png"
+    else
+        echo "❌ Could not find Codex icon in bundle" >&2
+        exit 1
+    fi
+
+    tools_dir="${WORKDIR}/tools"
+    appimagetool="${tools_dir}/appimagetool.AppImage"
+    mkdir -p "${tools_dir}"
+
+    if [[ ! -x "${appimagetool}" ]]; then
+        echo "⬇️  Downloading appimagetool..."
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL -o "${appimagetool}" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "${appimagetool}" "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+        else
+            echo "❌ Need curl or wget to download appimagetool" >&2
+            exit 1
+        fi
+        chmod +x "${appimagetool}"
+    fi
+
+    rm -f "${output_path}"
+    ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 "${appimagetool}" "${appdir}" "${output_path}" >/dev/null
+    chmod +x "${output_path}"
+
+    rm -rf "${tempdir}"
+}
 
 rebuild_native_modules_on_host() {
-    local app_dir="output/codex-linux"
-    local native_build_dir="output/native-build-host"
+    local app_dir="$1"
+    local native_build_dir="$2"
 
     if [[ ! -d "${app_dir}" ]]; then
         return
@@ -95,6 +182,8 @@ rebuild_native_modules_on_host() {
 }
 
 run_host_orchestrator() {
+    local docker_output_dir bundle_dir appimage_path
+
     echo "🐳 Building Codex Linux via Docker..."
     echo "======================================"
 
@@ -103,10 +192,15 @@ run_host_orchestrator() {
         exit 1
     fi
 
-    echo "📦 Building Docker image..."
-    docker build --no-cache -t codex-builder .
+    docker_output_dir="${WORKDIR}/docker-output"
+    bundle_dir="${docker_output_dir}/codex-linux"
+    appimage_path="${SCRIPT_DIR}/Codex.AppImage"
 
-    mkdir -p output
+    echo "📦 Building Docker image..."
+    docker build --no-cache -t codex-builder "${SCRIPT_DIR}"
+
+    rm -rf "${docker_output_dir}"
+    mkdir -p "${docker_output_dir}"
 
     echo "🔨 Running build container..."
     docker run --rm \
@@ -118,27 +212,32 @@ run_host_orchestrator() {
       -e HOME=/build \
       -e CARGO_BUILD_JOBS=2 \
       -e ENABLE_LINUX_UI_POLISH="${ENABLE_LINUX_UI_POLISH}" \
-      -v "$(pwd)/output:/output" \
+      -v "${docker_output_dir}:/output" \
       codex-builder
 
-    if [[ -d output/work/app_unpacked ]]; then
-        rm -rf output/codex-linux
-        cp -a output/work/app_unpacked output/codex-linux
+    if [[ -d "${docker_output_dir}/work/app_unpacked" ]]; then
+        rm -rf "${bundle_dir}"
+        cp -a "${docker_output_dir}/work/app_unpacked" "${bundle_dir}"
     fi
 
-    rebuild_native_modules_on_host
+    if [[ ! -d "${bundle_dir}" ]]; then
+        echo "❌ Missing app bundle after Docker build" >&2
+        exit 1
+    fi
+
+    rebuild_native_modules_on_host "${bundle_dir}" "${WORKDIR}/native-build-host"
+
+    echo "📦 Packaging AppImage..."
+    create_appimage "${bundle_dir}" "${appimage_path}"
+    rm -rf "${docker_output_dir}"
 
     echo ""
     echo "✅ Build complete!"
     echo "=================="
-    echo "📦 App bundle: ./output/codex-linux/"
-    echo "🔧 CLI binary: ./output/codex"
+    echo "📦 AppImage: ${appimage_path}"
     echo ""
-    echo "To install CLI system-wide:"
-    echo "  cp ./output/codex ~/.local/bin/"
-    echo ""
-    echo "To run GUI (requires Electron):"
-    echo "  ./output/codex-linux/codex-linux.sh"
+    echo "Run GUI: ${appimage_path}"
+    echo "Run CLI: ${appimage_path} --cli --help"
 }
 
 if [[ "${IN_DOCKER_BUILD:-0}" != "1" ]]; then
@@ -305,16 +404,42 @@ step "5/11" "Building Rust CLI for Linux (LONG STEP ~10-15 min)"
 
 cd "${WORKDIR}"
 
-if [[ -d "codex-src/codex-rs" ]]; then
-    substep "Found existing codex-src, pulling latest changes..."
-    cd codex-src
-    git pull --depth 1 2>&1 | tail -3 || substep "Git pull failed, using existing code"
-    cd ..
+substep "Cloning openai/codex repository..."
+substep "This downloads the Rust source code (~50MB)"
+rm -rf codex-src
+git clone --depth 1 https://github.com/openai/codex.git codex-src 2>&1 | tail -5 || error "Git clone failed"
+success "Cloned codex repository"
+
+cd "${WORKDIR}/codex-src"
+if [[ "${CODEX_GIT_REF}" == "latest-tag" ]]; then
+    substep "Selecting latest buildable tag..."
+    git fetch --tags --force 2>&1 | tail -3 || substep "Warning: failed to refresh tags"
+
+    SELECTED_TAG=""
+    while IFS= read -r tag; do
+        [[ -z "${tag}" ]] && continue
+        git checkout --detach "${tag}" >/dev/null 2>&1 || continue
+        if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+            SELECTED_TAG="${tag}"
+            break
+        fi
+    done < <(git tag --sort=-v:refname | head -n 30)
+
+    if [[ -n "${SELECTED_TAG}" ]]; then
+        success "Using openai/codex tag ${SELECTED_TAG}"
+    else
+        substep "No buildable tag found; falling back to default branch HEAD"
+        if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+            error "No buildable codex ref found automatically. Set CODEX_GIT_REF to a known-good ref."
+        fi
+        success "Using openai/codex default branch HEAD"
+    fi
 else
-    substep "Cloning openai/codex repository..."
-    substep "This downloads the Rust source code (~50MB)"
-    git clone --depth 1 https://github.com/openai/codex.git codex-src 2>&1 | tail -5 || error "Git clone failed"
-    success "Cloned codex repository"
+    substep "Checking out openai/codex ref ${CODEX_GIT_REF}"
+    git fetch --depth 1 origin "${CODEX_GIT_REF}" 2>&1 | tail -3 || error "Failed to fetch ref ${CODEX_GIT_REF}"
+    git checkout --detach FETCH_HEAD 2>&1 | tail -3 || error "Failed to checkout ref ${CODEX_GIT_REF}"
+    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || error "Ref ${CODEX_GIT_REF} is not buildable (invalid Cargo metadata)"
+    success "Using openai/codex ref ${CODEX_GIT_REF}"
 fi
 
 cd "${WORKDIR}/codex-src/codex-rs"
@@ -442,7 +567,7 @@ if [[ "${FORCE_CONTAINER_NATIVE_REBUILD:-0}" == "1" ]]; then
     npm rebuild better-sqlite3 2>&1 | tail -20 || substep "Warning: better-sqlite3 rebuild failed in container"
     npm rebuild node-pty 2>&1 | tail -20 || substep "Warning: node-pty rebuild failed in container"
 else
-    substep "Skipping in-container native rebuild; host rebuild in build-docker.sh handles Electron ABI"
+    substep "Skipping in-container native rebuild; host rebuild phase handles Electron ABI"
 fi
 
 # Step 7: Replace macOS-specific files
