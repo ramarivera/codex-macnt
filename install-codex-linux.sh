@@ -199,22 +199,45 @@ grep -A30 'members = \[' Cargo.toml | head -10
 substep "Starting compilation of codex binary..."
 substep "⚠️  THIS WILL TAKE 10-15 MINUTES!"
 substep "Compiling 30+ Rust crates in release mode..."
-echo ""
-echo "   Build progress (tail of output):"
-echo "   ----------------------------------------"
+substep ""
+substep "You will see compile output below (crates building, linking, etc.)"
+substep "If it looks stuck, it's probably still compiling - just wait!"
+substep ""
+echo "   ════════════════════════════════════════════════════════════════════════"
+echo "   🛠️  CARGO BUILD OUTPUT (live):"
+echo "   ════════════════════════════════════════════════════════════════════════"
 
-# Try musl target first for static linking, fallback to native
-if cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1 | tail -20; then
+# Build with live output (no piping to tail, so user sees progress)
+TARGET_DIR=""
+BUILD_SUCCESS=false
+
+# Try musl target first
+if cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1; then
     TARGET_DIR="target/x86_64-unknown-linux-musl/release"
+    BUILD_SUCCESS=true
+    echo ""
     success "Built with musl (statically linked, most compatible)"
-elif rustup target add x86_64-unknown-linux-musl 2>/dev/null && cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1 | tail -20; then
+# Try adding musl target then building
+elif rustup target add x86_64-unknown-linux-musl 2>/dev/null && cargo build --release --bin codex --target x86_64-unknown-linux-musl 2>&1; then
     TARGET_DIR="target/x86_64-unknown-linux-musl/release"
+    BUILD_SUCCESS=true
+    echo ""
     success "Built with musl after adding target"
+# Fallback to native target
 else
-    substep "Musl build failed, trying native target..."
-    cargo build --release --bin codex 2>&1 | tail -20 || error "Cargo build failed"
-    TARGET_DIR="target/release"
-    success "Built with native target"
+    echo ""
+    substep "Musl target failed or not available, trying native x86_64 target..."
+    echo "   ════════════════════════════════════════════════════════════════════════"
+    if cargo build --release --bin codex 2>&1; then
+        TARGET_DIR="target/release"
+        BUILD_SUCCESS=true
+        echo ""
+        success "Built with native target"
+    fi
+fi
+
+if [[ "$BUILD_SUCCESS" != "true" ]]; then
+    error "Cargo build failed after all attempts"
 fi
 
 substep "Checking built binary..."
@@ -224,11 +247,15 @@ file "${TARGET_DIR}/codex"
 success "Codex CLI built successfully"
 
 # Build Linux sandbox helper
-substep "Building Linux sandbox helper..."
-if cargo build --release --bin codex-linux-sandbox 2>&1 | tail -10; then
+substep ""
+substep "Building Linux sandbox helper (optional)..."
+echo "   ════════════════════════════════════════════════════════════════════════"
+if cargo build --release --bin codex-linux-sandbox 2>&1; then
+    echo ""
     success "Built codex-linux-sandbox"
 else
-    substep "Sandbox build skipped (may not be critical)"
+    echo ""
+    substep "⚠️  Sandbox build skipped (this is optional, CLI will work without it)"
 fi
 
 # Step 6: Rebuild native Node modules
