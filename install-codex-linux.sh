@@ -286,37 +286,18 @@ fi
 step "6/11" "Rebuilding native Node.js modules for Linux"
 cd "${WORKDIR}/app_unpacked"
 
-substep "Checking current native modules..."
+substep "Detecting Electron target for native module rebuild..."
+ELECTRON_VERSION=$(node -p "require('./package.json').devDependencies?.electron || ''" 2>/dev/null | tr -d '^"')
 
-if [[ -f "node_modules/better-sqlite3/build/Release/better_sqlite3.node" ]]; then
-    substep "Found better-sqlite3, checking architecture..."
-    file node_modules/better-sqlite3/build/Release/better_sqlite3.node
-    
-    if file node_modules/better-sqlite3/build/Release/better_sqlite3.node | grep -q Linux; then
-        success "better-sqlite3 already Linux-compatible"
-    else
-        substep "Rebuilding better-sqlite3 for Linux..."
-        npm rebuild better-sqlite3 2>&1 | tail -5 || substep "Rebuild warning (may still work)"
-        success "Rebuilt better-sqlite3"
-    fi
+if [[ -z "${ELECTRON_VERSION}" ]]; then
+    substep "Electron version not found in package metadata"
 else
-    substep "better-sqlite3 not found in expected location"
+    substep "Detected Electron ${ELECTRON_VERSION}"
 fi
 
-if [[ -f "node_modules/node-pty/build/Release/pty.node" ]]; then
-    substep "Found node-pty, checking architecture..."
-    file node_modules/node-pty/build/Release/pty.node
-    
-    if file node_modules/node-pty/build/Release/pty.node | grep -q Linux; then
-        success "node-pty already Linux-compatible"
-    else
-        substep "Rebuilding node-pty for Linux..."
-        npm rebuild node-pty 2>&1 | tail -5 || substep "Rebuild warning (may still work)"
-        success "Rebuilt node-pty"
-    fi
-else
-    substep "node-pty not found in expected location"
-fi
+substep "Attempting best-effort native module rebuild in container..."
+npm rebuild better-sqlite3 2>&1 | tail -20 || substep "Warning: better-sqlite3 rebuild failed in container (will rebuild on host)"
+npm rebuild node-pty 2>&1 | tail -20 || substep "Warning: node-pty rebuild failed in container (will rebuild on host)"
 
 # Step 7: Replace macOS-specific files
 step "7/11" "Replacing macOS components with Linux equivalents"
@@ -327,11 +308,13 @@ rm -vrf node_modules/electron-liquid-glass 2>/dev/null || substep "electron-liqu
 success "Cleaned macOS-specific files"
 
 substep "Creating resources directory..."
-mkdir -p resources
+mkdir -p resources resources/bin
 
 substep "Copying Linux CLI binary..."
 cp -v "${WORKDIR}/codex-src/codex-rs/${TARGET_DIR}/codex" resources/codex
 chmod -v +x resources/codex
+cp -v resources/codex resources/bin/codex
+chmod -v +x resources/bin/codex
 file resources/codex
 success "Installed codex binary"
 
@@ -352,11 +335,12 @@ cat > codex-linux.sh << 'LAUNCHER_EOF'
 # Codex Linux Launcher - Auto-generated
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
-export PATH="${APP_DIR}/resources:${PATH}"
+export PATH="${APP_DIR}/resources:${APP_DIR}/resources/bin:${PATH}"
+export CODEX_CLI_PATH="${APP_DIR}/resources/bin/codex"
 
 # Check for codex CLI
-if [[ ! -f "${APP_DIR}/resources/codex" ]]; then
-    echo "❌ Error: codex binary not found in ${APP_DIR}/resources/" >&2
+if [[ ! -f "${CODEX_CLI_PATH}" ]]; then
+    echo "❌ Error: codex binary not found at ${CODEX_CLI_PATH}" >&2
     exit 1
 fi
 
@@ -365,7 +349,7 @@ if command -v electron &> /dev/null; then
     exec electron "${APP_DIR}" "$@"
 else
     echo "ℹ️  Electron not installed. Run CLI mode instead:" >&2
-    echo "   ${APP_DIR}/resources/codex" >&2
+    echo "   ${CODEX_CLI_PATH}" >&2
     echo "" >&2
     echo "To install Electron: npm install -g electron" >&2
     exit 1
