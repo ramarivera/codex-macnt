@@ -70,7 +70,7 @@ jobs:
           cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" resources/codex.exe
           cp resources/codex.exe resources/bin/codex.exe
 
-      - name: Upload extracted app bundle
+      - name: Upload extracted app bundle (internal, deleted after packaging)
         uses: actions/upload-artifact@v4
         with:
           name: app-unpacked
@@ -242,18 +242,39 @@ jobs:
           echo "cli=$cli_ver" >> "$GITHUB_OUTPUT"
           echo "app=$app_ver" >> "$GITHUB_OUTPUT"
 
-      - name: Package as zip
+      - name: Build NSIS installer
         shell: bash
         run: |
+          app_ver="${{ steps.versions.outputs.app }}"
           mv app_unpacked codex-windows-x64
-          7z a -tzip Codex-Windows-x64.zip codex-windows-x64/
 
-      - name: Upload Windows build artifact
+          # NSIS is pre-installed on windows-latest at this path
+          MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          if [ ! -f "$MAKENSIS" ]; then
+            echo "NSIS not found, installing via choco..."
+            choco install nsis -y --no-progress
+            MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          fi
+
+          "$MAKENSIS" \
+            -DAPP_VERSION="$app_ver" \
+            -DSOURCE_DIR=codex-windows-x64 \
+            installer/windows/codex.nsi
+
+          ls -lh Codex-Setup-*.exe
+
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: Codex-Windows-x64
-          path: Codex-Windows-x64.zip
+          path: Codex-Setup-*.exe
           retention-days: 30
+
+      - name: Delete intermediate artifact
+        if: always()
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: app-unpacked
 
       - name: Upload to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -263,10 +284,11 @@ jobs:
         run: |
           tag="${GITHUB_REF#refs/tags/}"
           title="Codex Windows x64 ${tag}"
-          notes="Windows x64 portable build. App ${{ steps.versions.outputs.app }}, CLI ${{ steps.versions.outputs.cli }}."
+          notes="Windows x64 NSIS installer. App ${{ steps.versions.outputs.app }}, CLI ${{ steps.versions.outputs.cli }}."
+          installer=$(ls Codex-Setup-*.exe)
 
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" Codex-Windows-x64.zip --clobber
+            gh release upload "$tag" "$installer" --clobber
           else
-            gh release create "$tag" Codex-Windows-x64.zip --title "$title" --notes "$notes"
+            gh release create "$tag" "$installer" --title "$title" --notes "$notes"
           fi
