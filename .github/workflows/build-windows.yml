@@ -111,26 +111,27 @@ jobs:
       - name: Rebuild native modules for Windows Electron
         shell: bash
         run: |
-          cd app_unpacked
           electron_ver="${{ steps.electron-version.outputs.version }}"
 
-          # Install @electron/rebuild to properly compile native modules
-          npm install --no-save @electron/rebuild
+          # Install @electron/rebuild globally — we can't run npm install inside
+          # app_unpacked because its package.json has workspace:* references
+          # (from pnpm workspaces) that npm doesn't understand
+          npm install -g @electron/rebuild
 
           # Rebuild better-sqlite3 and node-pty against the Electron ABI
-          # --build-from-source forces compilation instead of downloading
-          # prebuilt binaries (which target Node.js, not Electron)
-          npx electron-rebuild \
+          # --module-dir points to the app without npm resolving its deps
+          electron-rebuild \
             --version "$electron_ver" \
             --arch x64 \
+            --module-dir ./app_unpacked \
             --only better-sqlite3,node-pty \
             --build-from-source
 
           # Debug: show what was built
           echo "=== better-sqlite3 ==="
-          find node_modules/better-sqlite3/build -name "*.node" 2>/dev/null || echo "no .node files found"
+          find app_unpacked/node_modules/better-sqlite3/build -name "*.node" 2>/dev/null || echo "no .node files found"
           echo "=== node-pty ==="
-          find node_modules/node-pty/build -name "*.node" -o -name "*.dll" -o -name "*.exe" 2>/dev/null || echo "no .node files found"
+          find app_unpacked/node_modules/node-pty/build -name "*.node" -o -name "*.dll" -o -name "*.exe" 2>/dev/null || echo "no .node files found"
 
       - name: Create Windows launcher scripts
         shell: bash
