@@ -263,6 +263,8 @@ jobs:
             -DSOURCE_DIR="$SOURCE_ABS" \
             installer/windows/codex.nsi
 
+          # NSIS writes OutFile relative to .nsi location, move to repo root
+          mv installer/windows/Codex-Setup-*.exe .
           ls -lh Codex-Setup-*.exe
 
       - name: Upload Windows installer
