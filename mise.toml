@@ -1087,17 +1087,85 @@ echo "Run CLI: {{config_root}}/Codex.AppImage --cli --help"
 
 # ── Windows x64 cross-compile tasks ──────────────────────────────────────────
 # These tasks cross-compile the Rust CLI for Windows from Linux using MinGW.
-# For the FULL Windows Electron app (with native modules), use the GitHub
-# Actions workflow: .github/workflows/build-windows.yml
+# The binary is committed to dist/windows-x64/codex.exe so that GitHub Actions
+# only needs to handle native Node modules + Electron packaging (no Rust build).
 #
-# Local cross-compile flow:
-#   mise run codex:win:build
-# Full CI flow (triggers GitHub Actions):
+# Cross-compile and commit the CLI:
+#   mise run codex:win:compile   → builds codex.exe, stages to dist/
+#   git add dist/ && git commit && git push
+# Then trigger the CI (picks up committed binary):
 #   mise run codex:win:ci
 
 [tasks."codex:win:docker-build"]
 description = "Build Windows cross-compile Docker image"
 run = "docker build -f {{config_root}}/Dockerfile.windows -t codex-windows-builder {{config_root}}"
+
+[tasks."codex:win:compile"]
+description = "Cross-compile codex.exe and stage at dist/windows-x64/ for commit"
+depends = ["codex:win:docker-build"]
+run = """
+set -euo pipefail
+docker_output_dir="{{env.WORKDIR}}/docker-output-windows"
+dist_dir="{{config_root}}/dist/windows-x64"
+mkdir -p "$docker_output_dir"
+
+docker run --rm \
+  --entrypoint bash \
+  -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
+  -v "$docker_output_dir:/output" \
+  codex-windows-builder -c '
+set -euo pipefail
+mkdir -p /output/work
+cd /output/work
+
+rm -rf codex-src
+git clone https://github.com/openai/codex.git codex-src >/dev/null
+
+cd codex-src
+if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
+  git fetch --tags --force >/dev/null 2>&1 || true
+  SELECTED_TAG=""
+  for tag in $(git tag --sort=-v:refname | head -n 200); do
+    git checkout --detach "$tag" >/dev/null 2>&1 || continue
+    if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+      SELECTED_TAG="$tag"
+      break
+    fi
+  done
+  if [ -z "$SELECTED_TAG" ]; then
+    echo "No buildable codex ref found" >&2
+    exit 1
+  fi
+else
+  git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
+  git checkout --detach FETCH_HEAD >/dev/null
+  if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+    echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
+    exit 1
+  fi
+fi
+
+cd codex-rs
+echo "Building codex CLI for x86_64-pc-windows-gnu..."
+cargo build --release --target x86_64-pc-windows-gnu --bin codex
+
+cp target/x86_64-pc-windows-gnu/release/codex.exe /output/codex.exe
+echo "codex.exe built successfully"
+'
+
+mkdir -p "$dist_dir"
+cp -f "$docker_output_dir/codex.exe" "$dist_dir/codex.exe"
+file "$dist_dir/codex.exe" | grep -qi "PE32\\|Windows"
+
+echo ""
+echo "\\u2705 codex.exe cross-compiled and staged at: dist/windows-x64/codex.exe"
+echo ""
+echo "Next steps:"
+echo "  git add dist/windows-x64/codex.exe"
+echo "  git commit -m \\"chore: update cross-compiled codex.exe for Windows x64\\""
+echo "  git push"
+echo "  mise run codex:win:ci"
+"""
 
 [tasks."codex:win:docker-run"]
 description = "Extract DMG/ASAR and cross-compile Rust CLI for Windows x64"

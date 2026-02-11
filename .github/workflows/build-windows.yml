@@ -1,24 +1,25 @@
-# Full Windows x64 Electron app build for Codex
-# This runs on a real Windows runner to handle native modules + packaging
+# Windows x64 Electron app build for Codex
 #
-# Trigger manually or on release tags. Produces a portable zip artifact.
+# Uses a pre-compiled codex.exe from dist/windows-x64/ (cross-compiled locally
+# via `mise run codex:win:compile`). This workflow only handles:
+#   1. DMG/ASAR extraction (Linux runner — fast, ~2 min)
+#   2. Native module rebuild + Electron packaging (Windows runner)
+#
+# No Rust compilation happens here — that's done locally and committed.
 
 name: Build Codex Windows x64
 
 on:
   workflow_dispatch:
-    inputs:
-      codex_git_ref:
-        description: "Codex repo git ref (tag or branch)"
-        required: false
-        default: "rust-v0.99.0-alpha.16"
   push:
     tags:
       - "v*"
+    paths:
+      - "dist/windows-x64/codex.exe"
+      - ".github/workflows/build-windows.yml"
 
 env:
   CODEX_DMG_URL: "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
-  CODEX_GIT_REF: ${{ github.event.inputs.codex_git_ref || 'rust-v0.99.0-alpha.16' }}
 
 jobs:
   # Stage 1: Extract app resources from DMG (Linux — needs dmg2img + 7z)
@@ -26,6 +27,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify codex.exe exists in repo
+        run: |
+          if [ ! -f dist/windows-x64/codex.exe ]; then
+            echo "❌ dist/windows-x64/codex.exe not found in repo." >&2
+            echo "   Run locally: mise run codex:win:compile" >&2
+            echo "   Then commit and push dist/windows-x64/codex.exe" >&2
+            exit 1
+          fi
+          file dist/windows-x64/codex.exe
 
       - name: Install extraction tools
         run: |
@@ -49,11 +60,15 @@ jobs:
           fi
           asar extract "$ASAR_PATH" app_unpacked/
 
-      - name: Clean macOS-only files
+      - name: Clean macOS-only files and install codex.exe from repo
         run: |
           cd app_unpacked
           rm -f native/sparkle.node
           rm -rf node_modules/electron-liquid-glass
+
+          mkdir -p resources resources/bin
+          cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" resources/codex.exe
+          cp resources/codex.exe resources/bin/codex.exe
 
       - name: Upload extracted app bundle
         uses: actions/upload-artifact@v4
@@ -62,15 +77,12 @@ jobs:
           path: app_unpacked/
           retention-days: 1
 
-  # Stage 2: Build everything on Windows
-  build-windows:
+  # Stage 2: Native modules + packaging on Windows
+  package:
     needs: extract
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -82,24 +94,6 @@ jobs:
         with:
           name: app-unpacked
           path: app_unpacked/
-
-      - name: Clone and build Codex Rust CLI
-        shell: bash
-        run: |
-          git clone https://github.com/openai/codex.git codex-src
-          cd codex-src
-          git fetch --depth 1 origin "$CODEX_GIT_REF"
-          git checkout --detach FETCH_HEAD
-
-          cd codex-rs
-          cargo build --release --bin codex
-
-      - name: Install codex.exe into app bundle
-        shell: bash
-        run: |
-          mkdir -p app_unpacked/resources app_unpacked/resources/bin
-          cp codex-src/codex-rs/target/release/codex.exe app_unpacked/resources/codex.exe
-          cp app_unpacked/resources/codex.exe app_unpacked/resources/bin/codex.exe
 
       - name: Determine Electron version
         id: electron-version
@@ -138,7 +132,7 @@ jobs:
           cp -f node_modules/node-pty/build/Release/pty.node \
             "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/pty.node"
 
-          # Also copy the winpty agent/dll if present
+          # Copy winpty agent/dll if present
           if [ -d "node_modules/node-pty/build/Release" ]; then
             cp -f node_modules/node-pty/build/Release/winpty*.dll \
               "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/" 2>/dev/null || true
@@ -146,7 +140,7 @@ jobs:
               "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/" 2>/dev/null || true
           fi
 
-      - name: Create Windows launcher script
+      - name: Create Windows launcher scripts
         shell: bash
         run: |
           cat > app_unpacked/codex-windows.bat <<'BAT'
@@ -160,11 +154,18 @@ jobs:
             exit /b 1
           )
 
+          if "%~1"=="--cli" (
+            shift
+            "%CODEX_CLI_PATH%" %*
+            exit /b %ERRORLEVEL%
+          )
+
           where electron >nul 2>nul
           if %ERRORLEVEL% equ 0 (
             electron "%APP_DIR%" %*
           ) else (
-            echo Electron not installed. Run CLI: %CODEX_CLI_PATH% >&2
+            echo Electron not installed. Run CLI: %CODEX_CLI_PATH%
+            echo   codex-windows.bat --cli --help
             exit /b 1
           )
           BAT
@@ -179,11 +180,18 @@ jobs:
             exit 1
           }
 
+          if ($args -and $args[0] -eq "--cli") {
+            $cliArgs = $args[1..($args.Length - 1)]
+            & $env:CODEX_CLI_PATH @cliArgs
+            exit $LASTEXITCODE
+          }
+
           $electronPath = Get-Command electron -ErrorAction SilentlyContinue
           if ($electronPath) {
             & electron $AppDir @args
           } else {
             Write-Host "Electron not installed. Run CLI: $env:CODEX_CLI_PATH"
+            Write-Host "  .\codex-windows.ps1 --cli --help"
             exit 1
           }
           PS1
@@ -193,7 +201,7 @@ jobs:
         run: |
           file app_unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node | grep -i "PE32+"
           file app_unpacked/node_modules/node-pty/build/Release/pty.node | grep -i "PE32+"
-          file app_unpacked/resources/codex.exe | grep -i "PE32+"
+          file app_unpacked/resources/codex.exe | grep -i "PE32"
 
       - name: Get version info
         id: versions
