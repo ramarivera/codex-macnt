@@ -39,6 +39,11 @@ What the script does:
 - `mise run codex:versions`
 - `mise run codex:build` (full pipeline)
 - `mise run codex:release` (full build + GitHub release)
+- `mise run codex:ui:extract` (extract built UI assets)
+- `mise run codex:ui:capture` (run AppImage and capture live UI via `agent-browser`)
+- `mise run codex:ui:design` (Claude CLI generates `ui-design-overrides.candidate.json`)
+- `mise run codex:ui:pin` (promote candidate to pinned `ui-design-overrides.json`)
+- `mise run codex:ui:loop` (design candidate + print next steps)
 
 ## Output
 
@@ -99,6 +104,29 @@ Run:
 ```nu
 mise run codex:release
 ```
+
+## Claude design loop (terminal)
+
+To co-design Linux polish with Claude Code CLI from terminal:
+
+```nu
+mise run codex:ui:loop
+```
+
+This flow:
+1. Extracts AppImage UI assets into `.ui-inspect/`.
+2. Runs the AppImage and captures live UI with `agent-browser` (`.ui-inspect/codex-current.png`, `.ui-inspect/codex-snapshot.json`).
+3. Asks `claude` CLI to produce candidate overrides in `ui-design-overrides.candidate.json`.
+4. Does not auto-apply anything (keeps output deterministic).
+
+Apply candidate intentionally:
+
+```nu
+mise run codex:ui:pin
+mise run codex:build
+```
+
+`codex:build` always uses pinned `ui-design-overrides.json`, so the UI does not change randomly between runs.
 
 ## Nushell compatibility fallback
 

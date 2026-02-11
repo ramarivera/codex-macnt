@@ -1,0 +1,36 @@
+{
+  "codex_titlebar_tint": "#f5f5f5",
+  "token_overrides": {
+    "--color-background-surface": "var(--gray-0)",
+    "--color-background-surface-under": "var(--gray-0)",
+    "--color-background-elevated-primary": "color-mix(in oklab, var(--gray-0) 92%, transparent)",
+    "--color-background-elevated-primary-opaque": "var(--gray-0)",
+    "--color-background-elevated-secondary": "color-mix(in oklab, var(--gray-0) 96%, transparent)",
+    "--color-background-elevated-secondary-opaque": "var(--gray-0)",
+    "--color-border": "color-mix(in oklab, var(--gray-1000) 8%, transparent)",
+    "--color-border-light": "color-mix(in oklab, var(--gray-1000) 5%, transparent)",
+    "--color-border-heavy": "color-mix(in oklab, var(--gray-1000) 12%, transparent)",
+    "--color-border-focus": "var(--blue-400)",
+    "--color-text-foreground": "var(--gray-1000)",
+    "--color-text-foreground-secondary": "color-mix(in oklab, var(--gray-1000) 82%, transparent)",
+    "--color-text-foreground-tertiary": "color-mix(in oklab, var(--gray-1000) 65%, transparent)",
+    "--color-text-accent": "var(--blue-400)",
+    "--color-text-button-secondary": "var(--gray-1000)",
+    "--color-icon-primary": "var(--gray-1000)",
+    "--color-icon-secondary": "color-mix(in oklab, var(--gray-1000) 82%, transparent)",
+    "--color-icon-tertiary": "color-mix(in oklab, var(--gray-1000) 65%, transparent)",
+    "--color-background-button-secondary": "color-mix(in oklab, var(--gray-1000) 5%, transparent)",
+    "--color-background-accent": "var(--blue-50)"
+  },
+  "notes": [
+    "Targets macOS-light appearance: white surfaces, dark-on-light text, gray-1000-based borders",
+    "Elevated secondary opaque uses gray-100 at 40% to match macOS light panel style",
+    "Border focus uses solid blue-400 (macOS light) instead of dark-mode blue-300 at 70% opacity",
+    "Button secondary background uses gray-1000 at 5% (macOS light) for subtle tinted buttons",
+    "Text button secondary overridden to gray-1000 so button labels stay dark on light backgrounds",
+    "Accent background uses blue-50 (macOS light) for subtle blue tint on accent panels",
+    "All overrides use only semantic tokens — no component selectors or brittle specificity",
+    "surface-under uses gray-0 to avoid washed/disabled-looking sidebar on Linux",
+    "Icon tokens mirror text tokens for consistent dark-on-light readability"
+  ]
+}

@@ -23,6 +23,10 @@ docker_output_dir="{{env.WORKDIR}}/docker-output"
 rm -rf "$docker_output_dir"
 mkdir -p "$docker_output_dir"
 
+if [ -f "{{config_root}}/ui-design-overrides.json" ]; then
+  cp "{{config_root}}/ui-design-overrides.json" "$docker_output_dir/ui-design-overrides.json"
+fi
+
 docker run --rm \
   --entrypoint bash \
   --cap-add SYS_ADMIN \
@@ -31,6 +35,7 @@ docker run --rm \
   -e CODEX_DMG_URL="{{env.CODEX_DMG_URL}}" \
   -e ENABLE_LINUX_UI_POLISH="{{env.ENABLE_LINUX_UI_POLISH}}" \
   -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
+  -e UI_OVERRIDES_FILE=/output/ui-design-overrides.json \
   -v "$docker_output_dir:/output" \
   codex-builder -c '
 set -euo pipefail
@@ -120,43 +125,175 @@ if [ -f "$WORKDIR/codex-src/codex-rs/target/release/codex-linux-sandbox" ]; then
 fi
 
 if [ "$ENABLE_LINUX_UI_POLISH" = "1" ]; then
-  cat > webview/assets/linux-polish.css <<"CSS"
-:root {
-  --linux-glass-bg: color-mix(in srgb, Canvas 78%, transparent);
-  --linux-glass-bg-strong: color-mix(in srgb, Canvas 86%, transparent);
-  --linux-glass-border: color-mix(in srgb, CanvasText 14%, transparent);
-  --linux-glass-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
-  --linux-glass-radius: 12px;
-}
-html, body, #root {
-  background: radial-gradient(1200px 700px at 10% -10%, rgba(80, 120, 255, 0.08), transparent 60%),
-              radial-gradient(900px 500px at 90% 0%, rgba(0, 200, 170, 0.07), transparent 55%);
-}
-nav, aside, [role="navigation"], [class*="sidebar" i], [class*="thread" i], [class*="panel" i], [class*="toolbar" i], [class*="header" i] {
-  background-color: var(--linux-glass-bg);
-  border-color: var(--linux-glass-border) !important;
-}
-[class*="card" i], [class*="surface" i], [class*="composer" i], input, textarea, button { border-radius: var(--linux-glass-radius); }
-@supports ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  nav, aside, [role="navigation"], [class*="sidebar" i], [class*="thread" i], [class*="panel" i], [class*="toolbar" i], [class*="header" i] {
-    -webkit-backdrop-filter: saturate(1.2) blur(14px);
-    backdrop-filter: saturate(1.2) blur(14px);
-    box-shadow: var(--linux-glass-shadow);
+  css_file=$(ls webview/assets/index-*.css 2>/dev/null | head -1 || true)
+  if [ -n "$css_file" ]; then
+    CSS_FILE="$css_file" node - <<"NODE"
+const fs = require("fs");
+
+const cssFile = process.env.CSS_FILE;
+const css = fs.readFileSync(cssFile, "utf8");
+const overridePath = process.env.UI_OVERRIDES_FILE || "";
+
+let manualTokenOverrides = {};
+let manualTitlebarTint = "";
+if (overridePath && fs.existsSync(overridePath)) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(overridePath, "utf8"));
+    if (parsed && typeof parsed === "object") {
+      if (parsed.token_overrides && typeof parsed.token_overrides === "object") {
+        manualTokenOverrides = parsed.token_overrides;
+      }
+      if (typeof parsed.codex_titlebar_tint === "string" && parsed.codex_titlebar_tint.trim()) {
+        manualTitlebarTint = parsed.codex_titlebar_tint.trim();
+      }
+    }
+  } catch {
+    manualTokenOverrides = {};
+    manualTitlebarTint = "";
   }
 }
-@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
-  nav, aside, [role="navigation"], [class*="sidebar" i], [class*="thread" i], [class*="panel" i], [class*="toolbar" i], [class*="header" i] {
-    background-color: var(--linux-glass-bg-strong);
+
+function readThemeVar(selector, key) {
+  const token = selector + "{";
+  let pos = 0;
+  while (true) {
+    const start = css.indexOf(token, pos);
+    if (start === -1) return "";
+    let i = start + token.length;
+    let depth = 1;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === "{") depth += 1;
+      else if (ch === "}") depth -= 1;
+      i += 1;
+    }
+    const block = css.slice(start + token.length, i - 1);
+    for (const decl of block.split(";")) {
+      const idx = decl.indexOf(":");
+      if (idx === -1) continue;
+      const declKey = decl.slice(0, idx).trim();
+      const value = decl.slice(idx + 1).trim();
+      if (declKey === key) return value;
+    }
+    pos = i;
   }
 }
-* { scrollbar-width: thin; }
-CSS
-  if ! grep -q "linux-polish.css" webview/index.html; then
-    tmp_index=$(mktemp)
-    printf "%s\n" "<link rel=\"stylesheet\" href=\"./assets/linux-polish.css\">" > "$tmp_index"
-    cat webview/index.html >> "$tmp_index"
-    mv "$tmp_index" webview/index.html
+
+const semanticDefaults = {
+  "--color-background-surface": readThemeVar(".electron-light", "--color-background-surface") || "var(--gray-0)",
+  "--color-background-surface-under": readThemeVar(".electron-light", "--color-background-surface-under") || "var(--gray-0)",
+  "--color-background-elevated-primary": readThemeVar(".electron-light", "--color-background-elevated-primary") || "color-mix(in oklab, var(--gray-0) 88%, transparent)",
+  "--color-background-elevated-secondary": readThemeVar(".electron-light", "--color-background-elevated-secondary") || "color-mix(in oklab, var(--gray-1000) 2%, transparent)",
+  "--color-border": readThemeVar(".electron-light", "--color-border") || "color-mix(in oklab, var(--gray-1000) 8%, transparent)",
+  "--color-text-foreground": readThemeVar(".electron-light", "--color-text-foreground") || "var(--gray-1000)",
+  "--color-text-foreground-secondary": readThemeVar(".electron-light", "--color-text-foreground-secondary") || "color-mix(in oklab, var(--gray-1000) 70%, transparent)",
+  "--color-icon-primary": readThemeVar(".electron-light", "--color-icon-primary") || "var(--gray-1000)",
+};
+
+const lines = [];
+lines.push("/* Auto-generated Linux polish: conservative semantic overrides */");
+lines.push(".electron-light,");
+lines.push(".electron-dark {");
+lines.push("  color-scheme: light;");
+for (const [key, value] of Object.entries(semanticDefaults)) {
+  lines.push(`  ${key}: ${value};`);
+}
+for (const [key, value] of Object.entries(manualTokenOverrides)) {
+  if (typeof key !== "string" || typeof value !== "string") continue;
+  if (!key.startsWith("--")) continue;
+  lines.push(`  ${key}: ${value};`);
+}
+const titlebarTint = manualTitlebarTint || "color-mix(in oklab, var(--blue-100) 42%, transparent)";
+lines.push(`  --codex-titlebar-tint: ${titlebarTint};`);
+lines.push("}");
+lines.push("");
+lines.push("/* Keep structure untouched; token-only overrides for stability */");
+lines.push(".electron-light aside,");
+lines.push(".electron-dark aside,");
+lines.push(`.electron-light [role="navigation"],`);
+lines.push(`.electron-dark [role="navigation"] {`);
+lines.push("  box-shadow: none !important;");
+lines.push("  background-color: var(--color-background-surface) !important;");
+lines.push("  opacity: 1 !important;");
+lines.push("  filter: none !important;");
+lines.push("}");
+lines.push("");
+lines.push(".electron-light nav[role=\\\"navigation\\\"],");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] {");
+lines.push("  mask-image: none !important;");
+lines.push("  -webkit-mask-image: none !important;");
+lines.push("}");
+lines.push("");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] button.opacity-75:not(:disabled),");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] button.opacity-75:not(:disabled),");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] [role=\\\"button\\\"].opacity-75:not([aria-disabled=\\\"true\\\"]),");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] [role=\\\"button\\\"].opacity-75:not([aria-disabled=\\\"true\\\"]) {");
+lines.push("  opacity: 1 !important;");
+lines.push("}");
+lines.push("");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] [class*=\\\"electron:opacity-75\\\"],");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] [class*=\\\"electron:opacity-75\\\"],");
+lines.push(".electron-light aside [class*=\\\"electron:opacity-75\\\"],");
+lines.push(".electron-dark aside [class*=\\\"electron:opacity-75\\\"],");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] .text-token-description-foreground,");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] .text-token-description-foreground,");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] .text-token-input-placeholder-foreground,");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] .text-token-input-placeholder-foreground {");
+lines.push("  opacity: 1 !important;");
+lines.push("}");
+lines.push("");
+lines.push(".electron-light aside .text-token-description-foreground,");
+lines.push(".electron-dark aside .text-token-description-foreground,");
+lines.push(".electron-light aside .text-token-input-placeholder-foreground,");
+lines.push(".electron-dark aside .text-token-input-placeholder-foreground,");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] .text-token-description-foreground,");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] .text-token-description-foreground,");
+lines.push(".electron-light nav[role=\\\"navigation\\\"] .text-token-input-placeholder-foreground,");
+lines.push(".electron-dark nav[role=\\\"navigation\\\"] .text-token-input-placeholder-foreground {");
+lines.push("  color: var(--color-text-foreground-secondary) !important;");
+lines.push("  opacity: 1 !important;");
+lines.push("}");
+lines.push("");
+lines.push(".electron-light .app-header-tint,");
+lines.push(".electron-dark .app-header-tint {");
+lines.push("  box-shadow: none !important;");
+lines.push("}");
+lines.push("");
+lines.push("/* Hide debug-only navigation entries in production builds */");
+lines.push("nav[role=\\\"navigation\\\"] [aria-label=\\\"Debug\\\"],");
+lines.push("nav[role=\\\"navigation\\\"] [title=\\\"Debug\\\"],");
+lines.push("nav[role=\\\"navigation\\\"] a[href$=\\\"/debug\\\"],");
+lines.push("nav[role=\\\"navigation\\\"] a[href*=\\\"/debug?\\\"],");
+lines.push("aside [aria-label=\\\"Debug\\\"],");
+lines.push("aside [title=\\\"Debug\\\"],");
+lines.push("aside a[href$=\\\"/debug\\\"],");
+lines.push("aside a[href*=\\\"/debug?\\\"] {");
+lines.push("  display: none !important;");
+lines.push("}");
+
+const nl = String.fromCharCode(10);
+fs.writeFileSync("webview/assets/linux-polish.css", lines.join(nl) + nl, "utf8");
+console.log("generated linux-polish.css with conservative semantic overrides");
+NODE
   fi
+
+  node - <<"NODE"
+const fs = require("fs");
+const file = "webview/index.html";
+let html = fs.readFileSync(file, "utf8");
+const nl = String.fromCharCode(10);
+
+html = html
+  .split(nl)
+  .filter((line) => !line.includes("linux-polish.css"))
+  .join(nl);
+
+if (!html.includes("linux-polish.css")) {
+  html = html.replace("</head>", `    <link rel="stylesheet" href="./assets/linux-polish.css">` + nl + "</head>");
+}
+
+fs.writeFileSync(file, html, "utf8");
+NODE
 fi
 
 cat > codex-linux.sh <<"LAUNCHER"
@@ -321,9 +458,12 @@ Categories=Development;IDE;TextEditor;
 Keywords=codex;ai;code;editor;openai;
 EOF
 
-icon_src=$(ls "$appdir"/usr/share/codex/webview/assets/logo-* 2>/dev/null | head -1 || true)
+icon_src=$(ls "$appdir"/usr/share/codex/webview/assets/app-*.png 2>/dev/null | head -1 || true)
 if [ -z "$icon_src" ]; then
-  echo "❌ Could not find Codex icon in bundle" >&2
+  icon_src=$(ls "$appdir"/usr/share/codex/webview/assets/logo-*.png 2>/dev/null | head -1 || true)
+fi
+if [ -z "$icon_src" ]; then
+  echo "❌ Could not find Codex icon PNG in bundle" >&2
   exit 1
 fi
 cp -f "$icon_src" "$appdir/codex.png"
@@ -384,6 +524,511 @@ cat > "$versions_file" <<EOF
   "cli": "$cli_version"
 }
 EOF
+"""
+
+[tasks."codex:ui:extract"]
+description = "Extract current AppImage assets for UI analysis"
+run = """
+set -euo pipefail
+appimage_path="{{config_root}}/Codex.AppImage"
+inspect_dir="{{config_root}}/.ui-inspect"
+
+if [ ! -x "$appimage_path" ]; then
+  echo "❌ AppImage not found at $appimage_path (run: mise run codex:build)" >&2
+  exit 1
+fi
+
+rm -rf "$inspect_dir"
+mkdir -p "$inspect_dir"
+cp "$appimage_path" "$inspect_dir/Codex.AppImage"
+(cd "$inspect_dir" && ./Codex.AppImage --appimage-extract >/dev/null 2>&1)
+
+css_file=$(ls "$inspect_dir"/squashfs-root/usr/share/codex/webview/assets/index-*.css 2>/dev/null | head -1 || true)
+if [ -z "$css_file" ]; then
+  echo "❌ Could not locate bundled index CSS in extracted AppImage" >&2
+  exit 1
+fi
+
+cp "$css_file" "$inspect_dir/index.css"
+if [ -f "$inspect_dir/squashfs-root/usr/share/codex/webview/assets/linux-polish.css" ]; then
+  cp "$inspect_dir/squashfs-root/usr/share/codex/webview/assets/linux-polish.css" "$inspect_dir/linux-polish.css"
+fi
+
+echo "UI inspect assets ready at: $inspect_dir"
+"""
+
+[tasks."codex:ui:sync-polish"]
+description = "Regenerate linux-polish.css in extracted UI bundle"
+run = """
+set -euo pipefail
+inspect_dir="{{config_root}}/.ui-inspect"
+assets_dir="$inspect_dir/squashfs-root/usr/share/codex/webview/assets"
+index_html="$inspect_dir/squashfs-root/usr/share/codex/webview/index.html"
+candidate_file="{{config_root}}/ui-design-overrides.candidate.json"
+pinned_file="{{config_root}}/ui-design-overrides.json"
+
+if [ ! -d "$assets_dir" ]; then
+  mise run codex:ui:extract >/dev/null
+fi
+
+css_file=$(ls "$assets_dir"/index-*.css 2>/dev/null | head -1 || true)
+if [ -z "$css_file" ]; then
+  echo "❌ Could not locate bundled index CSS in extracted AppImage" >&2
+  exit 1
+fi
+
+override_file="${UI_OVERRIDES_FILE:-}"
+if [ -z "$override_file" ]; then
+  if [ -s "$candidate_file" ]; then
+    override_file="$candidate_file"
+  elif [ -s "$pinned_file" ]; then
+    override_file="$pinned_file"
+  fi
+fi
+
+CSS_FILE="$css_file" OVERRIDE_FILE="$override_file" OUT_FILE="$assets_dir/linux-polish.css" node - <<'NODE'
+const fs = require('fs');
+
+const cssFile = process.env.CSS_FILE;
+const overridePath = process.env.OVERRIDE_FILE || '';
+const outFile = process.env.OUT_FILE;
+const css = fs.readFileSync(cssFile, 'utf8');
+
+let manualTokenOverrides = {};
+let manualTitlebarTint = '';
+if (overridePath && fs.existsSync(overridePath)) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(overridePath, 'utf8'));
+    if (parsed && typeof parsed === 'object') {
+      if (parsed.token_overrides && typeof parsed.token_overrides === 'object') {
+        manualTokenOverrides = parsed.token_overrides;
+      }
+      if (typeof parsed.codex_titlebar_tint === 'string' && parsed.codex_titlebar_tint.trim()) {
+        manualTitlebarTint = parsed.codex_titlebar_tint.trim();
+      }
+    }
+  } catch {
+    manualTokenOverrides = {};
+    manualTitlebarTint = '';
+  }
+}
+
+function readThemeVar(selector, key) {
+  const token = selector + '{';
+  let pos = 0;
+  while (true) {
+    const start = css.indexOf(token, pos);
+    if (start === -1) return '';
+    let i = start + token.length;
+    let depth = 1;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+      i += 1;
+    }
+    const block = css.slice(start + token.length, i - 1);
+    for (const decl of block.split(';')) {
+      const idx = decl.indexOf(':');
+      if (idx === -1) continue;
+      const declKey = decl.slice(0, idx).trim();
+      const value = decl.slice(idx + 1).trim();
+      if (declKey === key) return value;
+    }
+    pos = i;
+  }
+}
+
+const semanticDefaults = {
+  '--color-background-surface': readThemeVar('.electron-light', '--color-background-surface') || 'var(--gray-0)',
+  '--color-background-surface-under': readThemeVar('.electron-light', '--color-background-surface-under') || 'var(--gray-0)',
+  '--color-background-elevated-primary': readThemeVar('.electron-light', '--color-background-elevated-primary') || 'color-mix(in oklab, var(--gray-0) 88%, transparent)',
+  '--color-background-elevated-secondary': readThemeVar('.electron-light', '--color-background-elevated-secondary') || 'color-mix(in oklab, var(--gray-1000) 2%, transparent)',
+  '--color-border': readThemeVar('.electron-light', '--color-border') || 'color-mix(in oklab, var(--gray-1000) 8%, transparent)',
+  '--color-text-foreground': readThemeVar('.electron-light', '--color-text-foreground') || 'var(--gray-1000)',
+  '--color-text-foreground-secondary': readThemeVar('.electron-light', '--color-text-foreground-secondary') || 'color-mix(in oklab, var(--gray-1000) 70%, transparent)',
+  '--color-icon-primary': readThemeVar('.electron-light', '--color-icon-primary') || 'var(--gray-1000)',
+};
+
+const lines = [];
+lines.push('/* Auto-generated Linux polish: conservative semantic overrides */');
+lines.push('.electron-light,');
+lines.push('.electron-dark {');
+lines.push('  color-scheme: light;');
+for (const [key, value] of Object.entries(semanticDefaults)) {
+  lines.push(`  ${key}: ${value};`);
+}
+for (const [key, value] of Object.entries(manualTokenOverrides)) {
+  if (typeof key !== 'string' || typeof value !== 'string') continue;
+  if (!key.startsWith('--')) continue;
+  lines.push(`  ${key}: ${value};`);
+}
+const titlebarTint = manualTitlebarTint || 'color-mix(in oklab, var(--blue-100) 42%, transparent)';
+lines.push(`  --codex-titlebar-tint: ${titlebarTint};`);
+lines.push('}');
+lines.push('');
+lines.push('/* Keep structure untouched; token-only overrides for stability */');
+lines.push('.electron-light aside,');
+lines.push('.electron-dark aside,');
+lines.push('.electron-light [role="navigation"],');
+lines.push('.electron-dark [role="navigation"] {');
+lines.push('  box-shadow: none !important;');
+lines.push('  background-color: var(--color-background-surface) !important;');
+lines.push('  opacity: 1 !important;');
+lines.push('  filter: none !important;');
+lines.push('}');
+lines.push('');
+lines.push('.electron-light nav[role="navigation"],');
+lines.push('.electron-dark nav[role="navigation"] {');
+lines.push('  mask-image: none !important;');
+lines.push('  -webkit-mask-image: none !important;');
+lines.push('}');
+lines.push('');
+lines.push('.electron-light nav[role="navigation"] button.opacity-75:not(:disabled),');
+lines.push('.electron-dark nav[role="navigation"] button.opacity-75:not(:disabled),');
+lines.push('.electron-light nav[role="navigation"] [role="button"].opacity-75:not([aria-disabled="true"]),');
+lines.push('.electron-dark nav[role="navigation"] [role="button"].opacity-75:not([aria-disabled="true"]) {');
+lines.push('  opacity: 1 !important;');
+lines.push('}');
+lines.push('');
+lines.push('.electron-light nav[role="navigation"] [class*="electron:opacity-75"],');
+lines.push('.electron-dark nav[role="navigation"] [class*="electron:opacity-75"],');
+lines.push('.electron-light aside [class*="electron:opacity-75"],');
+lines.push('.electron-dark aside [class*="electron:opacity-75"],');
+lines.push('.electron-light nav[role="navigation"] .text-token-description-foreground,');
+lines.push('.electron-dark nav[role="navigation"] .text-token-description-foreground,');
+lines.push('.electron-light nav[role="navigation"] .text-token-input-placeholder-foreground,');
+lines.push('.electron-dark nav[role="navigation"] .text-token-input-placeholder-foreground {');
+lines.push('  opacity: 1 !important;');
+lines.push('}');
+lines.push('');
+lines.push('.electron-light aside .text-token-description-foreground,');
+lines.push('.electron-dark aside .text-token-description-foreground,');
+lines.push('.electron-light aside .text-token-input-placeholder-foreground,');
+lines.push('.electron-dark aside .text-token-input-placeholder-foreground,');
+lines.push('.electron-light nav[role="navigation"] .text-token-description-foreground,');
+lines.push('.electron-dark nav[role="navigation"] .text-token-description-foreground,');
+lines.push('.electron-light nav[role="navigation"] .text-token-input-placeholder-foreground,');
+lines.push('.electron-dark nav[role="navigation"] .text-token-input-placeholder-foreground {');
+lines.push('  color: var(--color-text-foreground-secondary) !important;');
+lines.push('  opacity: 1 !important;');
+lines.push('}');
+lines.push('');
+lines.push('.electron-light .app-header-tint,');
+lines.push('.electron-dark .app-header-tint {');
+lines.push('  box-shadow: none !important;');
+lines.push('}');
+lines.push('');
+lines.push('/* Hide debug-only navigation entries in production builds */');
+lines.push('nav[role="navigation"] [aria-label="Debug"],');
+lines.push('nav[role="navigation"] [title="Debug"],');
+lines.push('nav[role="navigation"] a[href$="/debug"],');
+lines.push('nav[role="navigation"] a[href*="/debug?"],');
+lines.push('aside [aria-label="Debug"],');
+lines.push('aside [title="Debug"],');
+lines.push('aside a[href$="/debug"],');
+lines.push('aside a[href*="/debug?"] {');
+lines.push('  display: none !important;');
+lines.push('}');
+
+const nl = String.fromCharCode(10);
+fs.writeFileSync(outFile, lines.join(nl) + nl, 'utf8');
+NODE
+
+INDEX_HTML="$index_html" node - <<'NODE'
+const fs = require('fs');
+const file = process.env.INDEX_HTML;
+let html = fs.readFileSync(file, 'utf8');
+const nl = String.fromCharCode(10);
+
+html = html
+  .split(nl)
+  .filter((line) => !line.includes('linux-polish.css'))
+  .join(nl);
+
+if (!html.includes('linux-polish.css')) {
+  html = html.replace('</head>', '    <link rel="stylesheet" href="./assets/linux-polish.css">' + nl + '</head>');
+}
+
+fs.writeFileSync(file, html, 'utf8');
+NODE
+
+cp "$css_file" "$inspect_dir/index.css"
+cp "$assets_dir/linux-polish.css" "$inspect_dir/linux-polish.css"
+
+echo "Synced linux polish in extracted bundle: $inspect_dir"
+"""
+
+[tasks."codex:ui:capture"]
+description = "Run extracted app and capture live UI"
+depends = ["codex:ui:sync-polish"]
+run = """
+set -euo pipefail
+inspect_dir="{{config_root}}/.ui-inspect"
+app_run="$inspect_dir/squashfs-root/AppRun"
+
+if ! command -v agent-browser >/dev/null 2>&1; then
+  echo "❌ agent-browser not found" >&2
+  exit 1
+fi
+
+if [ ! -x "$app_run" ]; then
+  echo "❌ Missing extracted AppRun at $app_run" >&2
+  echo "Run: mise run codex:ui:extract" >&2
+  exit 1
+fi
+
+# Kill any stale Codex/Electron from previous runs
+pkill -f "AppRun.*remote-debugging-port" 2>/dev/null || true
+if command -v xdotool >/dev/null 2>&1; then
+  for w in $(xdotool search --name "Open project" 2>/dev/null || true); do
+    xdotool windowclose "$w" 2>/dev/null || true
+  done
+fi
+sleep 0.5
+
+debug_port=$(node -e "const net=require('net');const s=net.createServer();s.listen(0,'127.0.0.1',()=>{process.stdout.write(String(s.address().port));s.close();});")
+
+"$app_run" --remote-debugging-port="$debug_port" --remote-debugging-address=127.0.0.1 >/tmp/codex-ui-capture.log 2>&1 &
+app_pid=$!
+
+cleanup() {
+  kill "$app_pid" >/dev/null 2>&1 || true
+  sleep 0.3
+  if command -v xdotool >/dev/null 2>&1; then
+    for w in $(xdotool search --name "Open project" 2>/dev/null || true); do
+      xdotool windowclose "$w" 2>/dev/null || true
+    done
+  fi
+}
+trap cleanup EXIT
+
+ready=0
+for _ in $(seq 1 80); do
+  if curl -fsS "http://127.0.0.1:$debug_port/json/version" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 0.1
+done
+
+if [ "$ready" -ne 1 ]; then
+  echo "❌ Timed out waiting for debug port $debug_port" >&2
+  exit 1
+fi
+
+sleep 1
+
+agent-browser --cdp "$debug_port" snapshot -i --json > "$inspect_dir/codex-snapshot.json"
+agent-browser --cdp "$debug_port" get title > "$inspect_dir/codex-title.txt"
+agent-browser --cdp "$debug_port" screenshot --full --json > "$inspect_dir/codex-screenshot-meta.json"
+
+node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const inspectDir = '{{config_root}}/.ui-inspect';
+const meta = JSON.parse(fs.readFileSync(path.join(inspectDir, 'codex-screenshot-meta.json'), 'utf8'));
+const src = meta && meta.data && meta.data.path;
+if (!src || !fs.existsSync(src)) {
+  throw new Error('screenshot path missing in codex-screenshot-meta.json');
+}
+fs.copyFileSync(src, path.join(inspectDir, 'codex-current.png'));
+NODE
+
+echo "Captured UI snapshot at $inspect_dir/codex-current.png"
+"""
+
+[tasks."codex:ui:design"]
+description = "Use Claude CLI to generate candidate UI overrides"
+depends = ["codex:ui:capture"]
+run = """
+set -euo pipefail
+inspect_dir="{{config_root}}/.ui-inspect"
+candidate_file="{{config_root}}/ui-design-overrides.candidate.json"
+summary_file="$inspect_dir/theme-summary.json"
+raw_file="$inspect_dir/claude-ui-response.json"
+claude_model="${CLAUDE_MODEL:-claude-opus-4-6}"
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "❌ claude CLI not found" >&2
+  exit 1
+fi
+
+node - <<'NODE'
+const fs = require('fs');
+const path = require('path');
+
+const inspectDir = '{{config_root}}/.ui-inspect';
+const cssFile = path.join(inspectDir, 'index.css');
+const outFile = path.join(inspectDir, 'theme-summary.json');
+const candidateFile = '{{config_root}}/ui-design-overrides.candidate.json';
+const pinnedFile = '{{config_root}}/ui-design-overrides.json';
+const css = fs.readFileSync(cssFile, 'utf8');
+
+let currentOverrides = {};
+const sourceFile = fs.existsSync(candidateFile) ? candidateFile : pinnedFile;
+if (fs.existsSync(sourceFile)) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sourceFile, 'utf8'));
+    if (parsed && parsed.token_overrides && typeof parsed.token_overrides === 'object') {
+      currentOverrides = parsed.token_overrides;
+    }
+  } catch {
+    currentOverrides = {};
+  }
+}
+
+function collectThemeVars(selector) {
+  const vars = {};
+  const token = selector + '{';
+  let pos = 0;
+  while (true) {
+    const start = css.indexOf(token, pos);
+    if (start === -1) break;
+    let i = start + token.length;
+    let depth = 1;
+    while (i < css.length && depth > 0) {
+      const ch = css[i];
+      if (ch === '{') depth += 1;
+      else if (ch === '}') depth -= 1;
+      i += 1;
+    }
+    const block = css.slice(start + token.length, i - 1);
+    for (const decl of block.split(';')) {
+      const idx = decl.indexOf(':');
+      if (idx === -1) continue;
+      const key = decl.slice(0, idx).trim();
+      const value = decl.slice(idx + 1).trim();
+      if (!key.startsWith('--')) continue;
+      vars[key] = value;
+    }
+    pos = i;
+  }
+  return vars;
+}
+
+const light = collectThemeVars('.electron-light');
+const dark = collectThemeVars('.electron-dark');
+const focusKeys = [
+  '--color-background-surface',
+  '--color-background-surface-under',
+  '--color-background-elevated-primary',
+  '--color-background-elevated-primary-opaque',
+  '--color-background-elevated-secondary',
+  '--color-background-elevated-secondary-opaque',
+  '--color-border',
+  '--color-border-light',
+  '--color-border-heavy',
+  '--color-border-focus',
+  '--color-text-foreground',
+  '--color-text-foreground-secondary',
+  '--color-text-foreground-tertiary',
+  '--color-text-accent',
+  '--color-text-button-secondary',
+  '--color-icon-primary',
+  '--color-icon-secondary',
+  '--color-icon-tertiary',
+  '--color-background-button-secondary',
+  '--color-background-accent',
+];
+
+const summary = {
+  focusTokens: focusKeys.map((key) => ({
+    key,
+    light: light[key] || null,
+    dark: dark[key] || null,
+    currentOverride: Object.prototype.hasOwnProperty.call(currentOverrides, key) ? currentOverrides[key] : null,
+  })),
+};
+
+const nl = String.fromCharCode(10);
+fs.writeFileSync(outFile, JSON.stringify(summary, null, 2) + nl, 'utf8');
+NODE
+
+schema='{"type":"object","properties":{"codex_titlebar_tint":{"type":"string"},"token_overrides":{"type":"object","additionalProperties":{"type":"string"}},"notes":{"type":"array","items":{"type":"string"}}},"required":["codex_titlebar_tint","token_overrides","notes"]}'
+
+prompt=$(cat <<PROMPT
+Design Linux UI overrides for Codex from this focused token summary:
+
+$(cat "$summary_file")
+
+Return stable, conservative overrides to make Linux look closer to a clean/light macOS style.
+Constraints:
+- Max 20 token_overrides entries.
+- Use only semantic tokens (prefer --color-background-*, --color-text-*, --color-border-*).
+- Avoid brittle selectors/components.
+- Keep contrast readable and avoid flashy styling.
+- Prioritize sidebar legibility and avoid washed-out thread labels.
+PROMPT
+)
+
+run_claude() {
+  local model_name="$1"
+  claude -p --model "$model_name" --permission-mode dontAsk --output-format json --json-schema "$schema" "$prompt" > "$raw_file"
+}
+
+if ! run_claude "$claude_model"; then
+  if [ "$claude_model" = "opus" ]; then
+    exit 1
+  fi
+  echo "⚠️ Model '$claude_model' unavailable, retrying with --model opus" >&2
+  run_claude "opus"
+fi
+
+node - <<'NODE'
+const fs = require('fs');
+const rawFile = '{{config_root}}/.ui-inspect/claude-ui-response.json';
+const outFile = '{{config_root}}/ui-design-overrides.candidate.json';
+const raw = JSON.parse(fs.readFileSync(rawFile, 'utf8'));
+const parsed = raw.structured_output || raw;
+if (!parsed || typeof parsed !== 'object') throw new Error('Invalid JSON root');
+if (typeof parsed.codex_titlebar_tint !== 'string') throw new Error('Missing codex_titlebar_tint');
+if (!parsed.token_overrides || typeof parsed.token_overrides !== 'object') throw new Error('Missing token_overrides');
+const entries = Object.entries(parsed.token_overrides);
+if (entries.length > 20) throw new Error('Too many token overrides (max 20)');
+for (const [k, v] of entries) {
+  if (!k.startsWith('--')) throw new Error(`Invalid token key: ${k}`);
+  if (typeof v !== 'string') throw new Error(`Invalid token value for ${k}`);
+}
+const nl = String.fromCharCode(10);
+fs.writeFileSync(outFile, JSON.stringify(parsed, null, 2) + nl, 'utf8');
+console.log('ui-design-overrides.candidate.json validated');
+NODE
+"""
+
+[tasks."codex:ui:pin"]
+description = "Promote candidate overrides to pinned overrides"
+run = """
+set -euo pipefail
+candidate_file="{{config_root}}/ui-design-overrides.candidate.json"
+pinned_file="{{config_root}}/ui-design-overrides.json"
+
+if [ ! -s "$candidate_file" ]; then
+  echo "❌ Candidate overrides missing: $candidate_file" >&2
+  exit 1
+fi
+
+cp "$candidate_file" "$pinned_file"
+echo "Pinned overrides updated: $pinned_file"
+"""
+
+[tasks."codex:ui:iterate"]
+description = "Fast loop: apply overrides and capture screenshot"
+depends = ["codex:ui:capture"]
+run = """
+echo "Updated screenshot: .ui-inspect/codex-current.png"
+"""
+
+[tasks."codex:ui:loop"]
+description = "Generate candidate with Claude and print next steps"
+depends = ["codex:ui:design"]
+run = """
+echo "UI candidate generated: ui-design-overrides.candidate.json"
+echo "Review then run:"
+echo "  mise run codex:ui:pin"
+echo "  mise run codex:ui:iterate"
+echo "Build AppImage only when happy with result:"
+echo "  mise run codex:build"
 """
 
 [tasks."codex:release"]
