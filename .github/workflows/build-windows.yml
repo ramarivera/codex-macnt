@@ -110,35 +110,27 @@ jobs:
 
       - name: Rebuild native modules for Windows Electron
         shell: bash
-        env:
-          npm_config_runtime: electron
-          npm_config_target: ${{ steps.electron-version.outputs.version }}
-          npm_config_disturl: https://electronjs.org/headers
-          npm_config_arch: x64
         run: |
           cd app_unpacked
+          electron_ver="${{ steps.electron-version.outputs.version }}"
 
-          # Rebuild better-sqlite3
-          sqlite_ver=$(node -p "require('./node_modules/better-sqlite3/package.json').version" 2>/dev/null || echo "12.5.0")
-          mkdir -p /tmp/native-rebuild && cd /tmp/native-rebuild
-          npm init -y
-          npm install --force --no-save "better-sqlite3@${sqlite_ver}"
-          cp -f node_modules/better-sqlite3/build/Release/better_sqlite3.node \
-            "$GITHUB_WORKSPACE/app_unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+          # Install @electron/rebuild to properly compile native modules
+          npm install --no-save @electron/rebuild
 
-          # Rebuild node-pty
-          pty_ver=$(node -p "require('$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/package.json').version" 2>/dev/null || echo "1.1.0")
-          npm install --force --no-save "node-pty@${pty_ver}"
-          cp -f node_modules/node-pty/build/Release/pty.node \
-            "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/pty.node"
+          # Rebuild better-sqlite3 and node-pty against the Electron ABI
+          # --build-from-source forces compilation instead of downloading
+          # prebuilt binaries (which target Node.js, not Electron)
+          npx electron-rebuild \
+            --version "$electron_ver" \
+            --arch x64 \
+            --only better-sqlite3,node-pty \
+            --build-from-source
 
-          # Copy winpty agent/dll if present
-          if [ -d "node_modules/node-pty/build/Release" ]; then
-            cp -f node_modules/node-pty/build/Release/winpty*.dll \
-              "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/" 2>/dev/null || true
-            cp -f node_modules/node-pty/build/Release/winpty-agent.exe \
-              "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/" 2>/dev/null || true
-          fi
+          # Debug: show what was built
+          echo "=== better-sqlite3 ==="
+          find node_modules/better-sqlite3/build -name "*.node" 2>/dev/null || echo "no .node files found"
+          echo "=== node-pty ==="
+          find node_modules/node-pty/build -name "*.node" -o -name "*.dll" -o -name "*.exe" 2>/dev/null || echo "no .node files found"
 
       - name: Create Windows launcher scripts
         shell: bash
@@ -199,8 +191,23 @@ jobs:
       - name: Verify native modules are PE binaries
         shell: bash
         run: |
-          file app_unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node | grep -i "PE32+"
-          file app_unpacked/node_modules/node-pty/build/Release/pty.node | grep -i "PE32+"
+          echo "=== Checking better-sqlite3 ==="
+          sqlite_node=$(find app_unpacked/node_modules/better-sqlite3 -name "better_sqlite3.node" | head -1)
+          if [ -z "$sqlite_node" ]; then
+            echo "better_sqlite3.node not found" >&2
+            exit 1
+          fi
+          file "$sqlite_node" | grep -i "PE32"
+
+          echo "=== Checking node-pty ==="
+          pty_node=$(find app_unpacked/node_modules/node-pty -name "pty.node" | head -1)
+          if [ -z "$pty_node" ]; then
+            echo "pty.node not found" >&2
+            exit 1
+          fi
+          file "$pty_node" | grep -i "PE32"
+
+          echo "=== Checking codex.exe ==="
           file app_unpacked/resources/codex.exe | grep -i "PE32"
 
       - name: Get version info
