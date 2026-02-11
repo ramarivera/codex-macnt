@@ -1,3 +1,4 @@
 *.AppImage
+*.zip
 .ui-inspect/
 ui-design-overrides.candidate.json

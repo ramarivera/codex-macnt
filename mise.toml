@@ -1070,8 +1070,8 @@ fi
 """
 
 [tasks."codex:cleanup"]
-description = "Remove temporary build cache directories"
-run = "rm -rf {{env.WORKDIR}}/docker-output {{env.WORKDIR}}/native-build-host"
+description = "Remove temporary build cache directories (Linux + Windows)"
+run = "rm -rf {{env.WORKDIR}}/docker-output {{env.WORKDIR}}/docker-output-windows {{env.WORKDIR}}/native-build-host"
 
 [tasks."codex:build"]
 description = "Build Codex AppImage end-to-end"
@@ -1084,6 +1084,288 @@ echo "📄 Versions: {{config_root}}/versions.json"
 echo "Run GUI: {{config_root}}/Codex.AppImage"
 echo "Run CLI: {{config_root}}/Codex.AppImage --cli --help"
 """
+
+# ── Windows x64 cross-compile tasks ──────────────────────────────────────────
+# These tasks cross-compile the Rust CLI for Windows from Linux using MinGW.
+# For the FULL Windows Electron app (with native modules), use the GitHub
+# Actions workflow: .github/workflows/build-windows.yml
+#
+# Local cross-compile flow:
+#   mise run codex:win:build
+# Full CI flow (triggers GitHub Actions):
+#   mise run codex:win:ci
+
+[tasks."codex:win:docker-build"]
+description = "Build Windows cross-compile Docker image"
+run = "docker build -f {{config_root}}/Dockerfile.windows -t codex-windows-builder {{config_root}}"
+
+[tasks."codex:win:docker-run"]
+description = "Extract DMG/ASAR and cross-compile Rust CLI for Windows x64"
+depends = ["codex:win:docker-build"]
+run = """
+set -euo pipefail
+docker_output_dir="{{env.WORKDIR}}/docker-output-windows"
+rm -rf "$docker_output_dir"
+mkdir -p "$docker_output_dir"
+
+if [ -f "{{config_root}}/ui-design-overrides.json" ]; then
+  cp "{{config_root}}/ui-design-overrides.json" "$docker_output_dir/ui-design-overrides.json"
+fi
+
+docker run --rm \
+  --entrypoint bash \
+  --cap-add SYS_ADMIN \
+  --security-opt apparmor:unconfined \
+  -e WORKDIR=/output/work \
+  -e CODEX_DMG_URL="{{env.CODEX_DMG_URL}}" \
+  -e ENABLE_LINUX_UI_POLISH="{{env.ENABLE_LINUX_UI_POLISH}}" \
+  -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
+  -e UI_OVERRIDES_FILE=/output/ui-design-overrides.json \
+  -v "$docker_output_dir:/output" \
+  codex-windows-builder -c '
+set -euo pipefail
+mkdir -p "$WORKDIR"
+cd "$WORKDIR"
+
+# ── Download & extract DMG (reuse if cached) ──
+if [ ! -f Codex.dmg ]; then
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --output Codex.dmg "$CODEX_DMG_URL"
+  else
+    wget -O Codex.dmg "$CODEX_DMG_URL"
+  fi
+fi
+
+rm -f Codex.img
+dmg2img Codex.dmg Codex.img
+
+rm -rf extracted app_unpacked
+mkdir -p extracted
+7z x Codex.img -oextracted/ -y >/dev/null || true
+
+ASAR_PATH=$(find extracted -name app.asar -type f | head -1)
+if [ -z "$ASAR_PATH" ]; then
+  echo "Could not locate app.asar" >&2
+  exit 1
+fi
+
+NODE_MAJOR=$(node -v | sed -E "s/^v([0-9]+).*/\\1/")
+ASAR_PKG="@electron/asar"
+if [ "$NODE_MAJOR" -lt 22 ]; then
+  ASAR_PKG="@electron/asar@3.2.13"
+fi
+
+mkdir -p .npm-local
+npm init -y --prefix .npm-local >/dev/null 2>&1 || true
+npm install --prefix .npm-local "$ASAR_PKG" >/dev/null
+.npm-local/node_modules/.bin/asar extract "$ASAR_PATH" app_unpacked/
+
+# ── Clone & build Rust CLI for Windows ──
+rm -rf codex-src
+git clone https://github.com/openai/codex.git codex-src >/dev/null
+
+cd codex-src
+if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
+  git fetch --tags --force >/dev/null 2>&1 || true
+  SELECTED_TAG=""
+  for tag in $(git tag --sort=-v:refname | head -n 200); do
+    git checkout --detach "$tag" >/dev/null 2>&1 || continue
+    if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+      SELECTED_TAG="$tag"
+      break
+    fi
+  done
+  if [ -z "$SELECTED_TAG" ]; then
+    git checkout --detach HEAD >/dev/null 2>&1
+    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || {
+      echo "No buildable codex ref found" >&2
+      exit 1
+    }
+  fi
+else
+  git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
+  git checkout --detach FETCH_HEAD >/dev/null
+  if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+    echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
+    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps
+    exit 1
+  fi
+fi
+
+cd codex-rs
+echo "Building codex CLI for x86_64-pc-windows-gnu..."
+cargo build --release --target x86_64-pc-windows-gnu --bin codex
+
+# ── Assemble Windows bundle ──
+cd "$WORKDIR/app_unpacked"
+rm -f native/sparkle.node
+rm -rf node_modules/electron-liquid-glass
+
+mkdir -p resources resources/bin
+cp "$WORKDIR/codex-src/codex-rs/target/x86_64-pc-windows-gnu/release/codex.exe" resources/codex.exe
+chmod +x resources/codex.exe
+cp resources/codex.exe resources/bin/codex.exe
+
+# ── Windows launcher scripts ──
+# Note: backslashes are doubled for TOML escape handling
+cat > codex-windows.bat <<"LAUNCHER_BAT"
+@echo off
+set "APP_DIR=%~dp0"
+set "PATH=%APP_DIR%resources;%APP_DIR%resources\\bin;%PATH%"
+set "CODEX_CLI_PATH=%APP_DIR%resources\\bin\\codex.exe"
+
+if not exist "%CODEX_CLI_PATH%" (
+  echo codex.exe not found at %CODEX_CLI_PATH% >&2
+  exit /b 1
+)
+
+if "%~1"=="--cli" (
+  shift
+  "%CODEX_CLI_PATH%" %*
+  exit /b %ERRORLEVEL%
+)
+
+where electron >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+  electron "%APP_DIR%" %*
+) else (
+  echo Electron not installed. Run CLI: %CODEX_CLI_PATH%
+  echo   codex-windows.bat --cli --help
+  exit /b 1
+)
+LAUNCHER_BAT
+
+cat > codex-windows.ps1 <<"LAUNCHER_PS1"
+$AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$env:PATH = "$AppDir\\resources;$AppDir\\resources\\bin;$env:PATH"
+$env:CODEX_CLI_PATH = "$AppDir\\resources\\bin\\codex.exe"
+
+if (-not (Test-Path $env:CODEX_CLI_PATH)) {
+  Write-Error "codex.exe not found at $env:CODEX_CLI_PATH"
+  exit 1
+}
+
+if ($args -and $args[0] -eq "--cli") {
+  $cliArgs = $args[1..($args.Length - 1)]
+  & $env:CODEX_CLI_PATH @cliArgs
+  exit $LASTEXITCODE
+}
+
+$electronPath = Get-Command electron -ErrorAction SilentlyContinue
+if ($electronPath) {
+  & electron $AppDir @args
+} else {
+  Write-Host "Electron not installed. Run CLI: $env:CODEX_CLI_PATH"
+  Write-Host "  .\\codex-windows.ps1 --cli --help"
+  exit 1
+}
+LAUNCHER_PS1
+'
+"""
+
+[tasks."codex:win:prepare-bundle"]
+description = "Copy Windows bundle to stable cache path"
+depends = ["codex:win:docker-run"]
+run = """
+set -euo pipefail
+docker_output_dir="{{env.WORKDIR}}/docker-output-windows"
+bundle_dir="$docker_output_dir/codex-windows"
+
+if [ -d "$docker_output_dir/work/app_unpacked" ]; then
+  rm -rf "$bundle_dir"
+  cp -a "$docker_output_dir/work/app_unpacked" "$bundle_dir"
+fi
+
+if [ ! -d "$bundle_dir" ]; then
+  echo "❌ Missing app bundle after Docker build" >&2
+  exit 1
+fi
+
+# Verify the cross-compiled binary exists
+if [ ! -f "$bundle_dir/resources/codex.exe" ]; then
+  echo "❌ codex.exe not found in bundle" >&2
+  exit 1
+fi
+file "$bundle_dir/resources/codex.exe" | grep -qi "PE32\\|Windows"
+"""
+
+[tasks."codex:win:package"]
+description = "Package Windows bundle as a portable zip"
+depends = ["codex:win:prepare-bundle"]
+run = """
+set -euo pipefail
+bundle_dir="{{env.WORKDIR}}/docker-output-windows/codex-windows"
+output_path="{{config_root}}/Codex-Windows-x64.zip"
+
+if [ ! -d "$bundle_dir" ]; then
+  echo "❌ Windows bundle not found at $bundle_dir" >&2
+  exit 1
+fi
+
+rm -f "$output_path"
+
+# Create a clean directory name for the zip contents
+staging_dir=$(mktemp -d)
+cp -a "$bundle_dir" "$staging_dir/codex-windows-x64"
+
+(cd "$staging_dir" && 7z a -tzip "$output_path" codex-windows-x64/)
+rm -rf "$staging_dir"
+
+echo ""
+echo "📦 Windows zip: $output_path"
+echo ""
+echo "⚠️  NOTE: This bundle has the cross-compiled Rust CLI (MinGW/GNU)"
+echo "    but native Node modules (better-sqlite3, node-pty) are still"
+echo "    Linux ELF binaries. The Electron GUI will NOT work on Windows"
+echo "    until native modules are rebuilt on a real Windows machine."
+echo ""
+echo "    For a complete Windows build with working native modules, use:"
+echo "      mise run codex:win:ci"
+echo "    or run the GitHub Actions workflow manually."
+echo ""
+echo "    The CLI binary (codex.exe --cli) should work standalone on Windows."
+"""
+
+[tasks."codex:win:build"]
+description = "Cross-compile Windows bundle from Linux (CLI only — native modules need Windows)"
+depends = ["codex:win:package"]
+run = """
+echo ""
+echo "✅ Windows cross-compile complete!"
+echo "📦 Zip: {{config_root}}/Codex-Windows-x64.zip"
+echo ""
+echo "This contains a working codex.exe CLI built with MinGW."
+echo "For the full Electron app, run: mise run codex:win:ci"
+"""
+
+[tasks."codex:win:ci"]
+description = "Trigger GitHub Actions workflow for full Windows Electron build"
+run = """
+set -euo pipefail
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "❌ GitHub CLI (gh) not found" >&2
+  exit 1
+fi
+
+gh auth status >/dev/null 2>&1 || {
+  echo "❌ gh is not authenticated. Run: gh auth login" >&2
+  exit 1
+}
+
+echo "Triggering Windows build workflow on GitHub Actions..."
+gh workflow run build-windows.yml \
+  --field codex_git_ref="{{env.CODEX_GIT_REF}}"
+
+echo ""
+echo "✅ Workflow dispatched!"
+echo "Watch progress: gh run list --workflow=build-windows.yml"
+echo "Or open: $(gh repo view --json url -q .url)/actions/workflows/build-windows.yml"
+"""
+
+[tasks."codex:win:cleanup"]
+description = "Remove Windows build cache directories"
+run = "rm -rf {{env.WORKDIR}}/docker-output-windows"
 
 [settings]
 jobs = 4

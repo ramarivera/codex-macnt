@@ -1,0 +1,234 @@
+# Full Windows x64 Electron app build for Codex
+# This runs on a real Windows runner to handle native modules + packaging
+#
+# Trigger manually or on release tags. Produces a portable zip artifact.
+
+name: Build Codex Windows x64
+
+on:
+  workflow_dispatch:
+    inputs:
+      codex_git_ref:
+        description: "Codex repo git ref (tag or branch)"
+        required: false
+        default: "rust-v0.99.0-alpha.16"
+  push:
+    tags:
+      - "v*"
+
+env:
+  CODEX_DMG_URL: "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+  CODEX_GIT_REF: ${{ github.event.inputs.codex_git_ref || 'rust-v0.99.0-alpha.16' }}
+
+jobs:
+  # Stage 1: Extract app resources from DMG (Linux — needs dmg2img + 7z)
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full dmg2img
+          npm install -g @electron/asar
+
+      - name: Download and extract DMG
+        run: |
+          curl -L --fail -o Codex.dmg "$CODEX_DMG_URL"
+          dmg2img Codex.dmg Codex.img
+          mkdir -p extracted
+          7z x Codex.img -oextracted/ -y >/dev/null || true
+
+      - name: Extract ASAR
+        run: |
+          ASAR_PATH=$(find extracted -name app.asar -type f | head -1)
+          if [ -z "$ASAR_PATH" ]; then
+            echo "Could not locate app.asar" >&2
+            exit 1
+          fi
+          asar extract "$ASAR_PATH" app_unpacked/
+
+      - name: Clean macOS-only files
+        run: |
+          cd app_unpacked
+          rm -f native/sparkle.node
+          rm -rf node_modules/electron-liquid-glass
+
+      - name: Upload extracted app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-unpacked
+          path: app_unpacked/
+          retention-days: 1
+
+  # Stage 2: Build everything on Windows
+  build-windows:
+    needs: extract
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download extracted app bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: app-unpacked
+          path: app_unpacked/
+
+      - name: Clone and build Codex Rust CLI
+        shell: bash
+        run: |
+          git clone https://github.com/openai/codex.git codex-src
+          cd codex-src
+          git fetch --depth 1 origin "$CODEX_GIT_REF"
+          git checkout --detach FETCH_HEAD
+
+          cd codex-rs
+          cargo build --release --bin codex
+
+      - name: Install codex.exe into app bundle
+        shell: bash
+        run: |
+          mkdir -p app_unpacked/resources app_unpacked/resources/bin
+          cp codex-src/codex-rs/target/release/codex.exe app_unpacked/resources/codex.exe
+          cp app_unpacked/resources/codex.exe app_unpacked/resources/bin/codex.exe
+
+      - name: Determine Electron version
+        id: electron-version
+        shell: bash
+        run: |
+          cd app_unpacked
+          ver=$(node -p "require('./package.json').devDependencies?.electron || ''" 2>/dev/null || true)
+          ver="${ver#^}"
+          if [ -z "$ver" ]; then
+            echo "Could not determine Electron version from package.json" >&2
+            exit 1
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+
+      - name: Rebuild native modules for Windows Electron
+        shell: bash
+        env:
+          npm_config_runtime: electron
+          npm_config_target: ${{ steps.electron-version.outputs.version }}
+          npm_config_disturl: https://electronjs.org/headers
+          npm_config_arch: x64
+        run: |
+          cd app_unpacked
+
+          # Rebuild better-sqlite3
+          sqlite_ver=$(node -p "require('./node_modules/better-sqlite3/package.json').version" 2>/dev/null || echo "12.5.0")
+          mkdir -p /tmp/native-rebuild && cd /tmp/native-rebuild
+          npm init -y
+          npm install --force --no-save "better-sqlite3@${sqlite_ver}"
+          cp -f node_modules/better-sqlite3/build/Release/better_sqlite3.node \
+            "$GITHUB_WORKSPACE/app_unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+
+          # Rebuild node-pty
+          pty_ver=$(node -p "require('$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/package.json').version" 2>/dev/null || echo "1.1.0")
+          npm install --force --no-save "node-pty@${pty_ver}"
+          cp -f node_modules/node-pty/build/Release/pty.node \
+            "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/pty.node"
+
+          # Also copy the winpty agent/dll if present
+          if [ -d "node_modules/node-pty/build/Release" ]; then
+            cp -f node_modules/node-pty/build/Release/winpty*.dll \
+              "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/" 2>/dev/null || true
+            cp -f node_modules/node-pty/build/Release/winpty-agent.exe \
+              "$GITHUB_WORKSPACE/app_unpacked/node_modules/node-pty/build/Release/" 2>/dev/null || true
+          fi
+
+      - name: Create Windows launcher script
+        shell: bash
+        run: |
+          cat > app_unpacked/codex-windows.bat <<'BAT'
+          @echo off
+          set "APP_DIR=%~dp0"
+          set "PATH=%APP_DIR%resources;%APP_DIR%resources\bin;%PATH%"
+          set "CODEX_CLI_PATH=%APP_DIR%resources\bin\codex.exe"
+
+          if not exist "%CODEX_CLI_PATH%" (
+            echo codex.exe not found at %CODEX_CLI_PATH% >&2
+            exit /b 1
+          )
+
+          where electron >nul 2>nul
+          if %ERRORLEVEL% equ 0 (
+            electron "%APP_DIR%" %*
+          ) else (
+            echo Electron not installed. Run CLI: %CODEX_CLI_PATH% >&2
+            exit /b 1
+          )
+          BAT
+
+          cat > app_unpacked/codex-windows.ps1 <<'PS1'
+          $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+          $env:PATH = "$AppDir\resources;$AppDir\resources\bin;$env:PATH"
+          $env:CODEX_CLI_PATH = "$AppDir\resources\bin\codex.exe"
+
+          if (-not (Test-Path $env:CODEX_CLI_PATH)) {
+            Write-Error "codex.exe not found at $env:CODEX_CLI_PATH"
+            exit 1
+          }
+
+          $electronPath = Get-Command electron -ErrorAction SilentlyContinue
+          if ($electronPath) {
+            & electron $AppDir @args
+          } else {
+            Write-Host "Electron not installed. Run CLI: $env:CODEX_CLI_PATH"
+            exit 1
+          }
+          PS1
+
+      - name: Verify native modules are PE binaries
+        shell: bash
+        run: |
+          file app_unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node | grep -i "PE32+"
+          file app_unpacked/node_modules/node-pty/build/Release/pty.node | grep -i "PE32+"
+          file app_unpacked/resources/codex.exe | grep -i "PE32+"
+
+      - name: Get version info
+        id: versions
+        shell: bash
+        run: |
+          cli_ver=$(app_unpacked/resources/codex.exe --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+          app_ver=$(node -p "require('./app_unpacked/package.json').version" 2>/dev/null || echo "unknown")
+          echo "cli=$cli_ver" >> "$GITHUB_OUTPUT"
+          echo "app=$app_ver" >> "$GITHUB_OUTPUT"
+
+      - name: Package as zip
+        shell: bash
+        run: |
+          mv app_unpacked codex-windows-x64
+          7z a -tzip Codex-Windows-x64.zip codex-windows-x64/
+
+      - name: Upload Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Windows-x64
+          path: Codex-Windows-x64.zip
+          retention-days: 30
+
+      - name: Upload to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          title="Codex Windows x64 ${tag}"
+          notes="Windows x64 portable build. App ${{ steps.versions.outputs.app }}, CLI ${{ steps.versions.outputs.cli }}."
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" Codex-Windows-x64.zip --clobber
+          else
+            gh release create "$tag" Codex-Windows-x64.zip --title "$title" --notes "$notes"
+          fi
