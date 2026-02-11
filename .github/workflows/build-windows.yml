@@ -256,9 +256,11 @@ jobs:
             MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
           fi
 
+          # NSIS resolves paths relative to the .nsi file, so pass absolute path
+          SOURCE_ABS="$(cygpath -w "$(pwd)/codex-windows-x64")"
           "$MAKENSIS" \
             -DAPP_VERSION="$app_ver" \
-            -DSOURCE_DIR=codex-windows-x64 \
+            -DSOURCE_DIR="$SOURCE_ABS" \
             installer/windows/codex.nsi
 
           ls -lh Codex-Setup-*.exe
