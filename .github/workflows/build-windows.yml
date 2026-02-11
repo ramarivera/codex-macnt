@@ -155,67 +155,35 @@ jobs:
           echo "=== node-pty ==="
           find app_unpacked/node_modules/node-pty/build -name "*.node" -o -name "*.dll" -o -name "*.exe" 2>/dev/null || echo "no .node files found"
 
-      - name: Create Windows launcher scripts
+      - name: Download and assemble Electron distribution
         shell: bash
         run: |
-          cat > app_unpacked/codex-windows.bat <<'BAT'
-          @echo off
-          set "APP_DIR=%~dp0"
-          set "PATH=%APP_DIR%resources;%APP_DIR%resources\bin;%PATH%"
-          set "CODEX_CLI_PATH=%APP_DIR%resources\bin\codex.exe"
+          electron_ver="${{ steps.electron-version.outputs.version }}"
+          echo "Downloading Electron v${electron_ver} win32-x64..."
+          curl -sL --fail -o electron.zip \
+            "https://github.com/electron/electron/releases/download/v${electron_ver}/electron-v${electron_ver}-win32-x64.zip"
 
-          if not exist "%CODEX_CLI_PATH%" (
-            echo codex.exe not found at %CODEX_CLI_PATH% >&2
-            exit /b 1
-          )
+          mkdir -p electron-dist
+          unzip -q electron.zip -d electron-dist
 
-          if "%~1"=="--cli" (
-            shift
-            "%CODEX_CLI_PATH%" %*
-            exit /b %ERRORLEVEL%
-          )
+          # Replace default app with our extracted app bundle
+          rm -f electron-dist/resources/default_app.asar
+          mv app_unpacked electron-dist/resources/app
 
-          where electron >nul 2>nul
-          if %ERRORLEVEL% equ 0 (
-            electron "%APP_DIR%" %*
-          ) else (
-            echo Electron not installed. Run CLI: %CODEX_CLI_PATH%
-            echo   codex-windows.bat --cli --help
-            exit /b 1
-          )
-          BAT
+          # Rename electron.exe to Codex.exe
+          mv electron-dist/electron.exe electron-dist/Codex.exe
 
-          cat > app_unpacked/codex-windows.ps1 <<'PS1'
-          $AppDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-          $env:PATH = "$AppDir\resources;$AppDir\resources\bin;$env:PATH"
-          $env:CODEX_CLI_PATH = "$AppDir\resources\bin\codex.exe"
-
-          if (-not (Test-Path $env:CODEX_CLI_PATH)) {
-            Write-Error "codex.exe not found at $env:CODEX_CLI_PATH"
-            exit 1
-          }
-
-          if ($args -and $args[0] -eq "--cli") {
-            $cliArgs = $args[1..($args.Length - 1)]
-            & $env:CODEX_CLI_PATH @cliArgs
-            exit $LASTEXITCODE
-          }
-
-          $electronPath = Get-Command electron -ErrorAction SilentlyContinue
-          if ($electronPath) {
-            & electron $AppDir @args
-          } else {
-            Write-Host "Electron not installed. Run CLI: $env:CODEX_CLI_PATH"
-            Write-Host "  .\codex-windows.ps1 --cli --help"
-            exit 1
-          }
-          PS1
+          echo "=== Electron distribution assembled ==="
+          ls -lh electron-dist/Codex.exe
+          ls electron-dist/resources/app/package.json
 
       - name: Verify native modules are PE binaries
         shell: bash
         run: |
+          APP=electron-dist/resources/app
+
           echo "=== Checking better-sqlite3 ==="
-          sqlite_node=$(find app_unpacked/node_modules/better-sqlite3 -name "better_sqlite3.node" | head -1)
+          sqlite_node=$(find "$APP/node_modules/better-sqlite3" -name "better_sqlite3.node" | head -1)
           if [ -z "$sqlite_node" ]; then
             echo "better_sqlite3.node not found" >&2
             exit 1
@@ -223,22 +191,26 @@ jobs:
           file "$sqlite_node" | grep -i "PE32"
 
           echo "=== Checking node-pty ==="
-          pty_node=$(find app_unpacked/node_modules/node-pty -name "pty.node" | head -1)
+          pty_node=$(find "$APP/node_modules/node-pty" -name "pty.node" | head -1)
           if [ -z "$pty_node" ]; then
             echo "pty.node not found" >&2
             exit 1
           fi
           file "$pty_node" | grep -i "PE32"
 
-          echo "=== Checking codex.exe ==="
-          file app_unpacked/resources/codex.exe | grep -i "PE32"
+          echo "=== Checking Codex.exe (Electron) ==="
+          file electron-dist/Codex.exe | grep -i "PE32"
+
+          echo "=== Checking codex CLI ==="
+          file "$APP/resources/codex.exe" | grep -i "PE32"
 
       - name: Get version info
         id: versions
         shell: bash
         run: |
-          cli_ver=$(app_unpacked/resources/codex.exe --version 2>/dev/null | awk '{print $2}' || echo "unknown")
-          app_ver=$(node -p "require('./app_unpacked/package.json').version" 2>/dev/null || echo "unknown")
+          APP=electron-dist/resources/app
+          cli_ver=$("$APP/resources/codex.exe" --version 2>/dev/null | awk '{print $2}' || echo "unknown")
+          app_ver=$(node -p "require('./$APP/package.json').version" 2>/dev/null || echo "unknown")
           echo "cli=$cli_ver" >> "$GITHUB_OUTPUT"
           echo "app=$app_ver" >> "$GITHUB_OUTPUT"
 
@@ -246,7 +218,7 @@ jobs:
         shell: bash
         run: |
           app_ver="${{ steps.versions.outputs.app }}"
-          mv app_unpacked codex-windows-x64
+          mv electron-dist codex-windows-x64
 
           # NSIS is pre-installed on windows-latest at this path
           MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"

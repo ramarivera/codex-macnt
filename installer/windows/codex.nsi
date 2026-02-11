@@ -1,12 +1,12 @@
 ; Codex for Windows - NSIS Installer Script
-; Installs the Codex CLI + Electron app bundle per-user (no admin required)
+; Bundles Electron runtime + app code. Per-user install, no admin required.
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
 ; --- Build-time defines (passed via makensis -D) ---
 ; APP_VERSION  - e.g. "1.0.0"
-; SOURCE_DIR   - path to the assembled app folder
+; SOURCE_DIR   - absolute path to the assembled Electron distribution folder
 
 !ifndef APP_VERSION
   !define APP_VERSION "0.0.0"
@@ -18,7 +18,8 @@
 ; --- Application metadata ---
 !define APP_NAME        "Codex"
 !define APP_PUBLISHER   "OpenAI"
-!define APP_EXE         "codex.exe"
+!define APP_EXE         "Codex.exe"
+!define CLI_EXE         "resources\app\resources\bin\codex.exe"
 !define UNINSTALL_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
 Name "${APP_NAME} ${APP_VERSION}"
@@ -32,7 +33,8 @@ SetCompressor /SOLID lzma
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES
-!define MUI_FINISHPAGE_TEXT "Codex has been installed.$\r$\n$\r$\nThe CLI is at:$\r$\n  $INSTDIR\resources\bin\codex.exe$\r$\n$\r$\nTo use it from any terminal, add that directory to your PATH."
+!define MUI_FINISHPAGE_RUN "$INSTDIR\${APP_EXE}"
+!define MUI_FINISHPAGE_RUN_TEXT "Launch ${APP_NAME}"
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
@@ -52,8 +54,10 @@ Section "Install"
 
   ; Start Menu shortcuts
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+  CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
+    "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\Codex CLI.lnk" \
-    "$INSTDIR\resources\bin\${APP_EXE}" "" "$INSTDIR\resources\bin\${APP_EXE}" 0
+    "$INSTDIR\${CLI_EXE}" "" "$INSTDIR\${CLI_EXE}" 0
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" \
     "$INSTDIR\uninstall.exe"
 
@@ -61,6 +65,7 @@ Section "Install"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName"            "${APP_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion"         "${APP_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher"               "${APP_PUBLISHER}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon"             "$INSTDIR\${APP_EXE}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation"         "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString"         '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINSTALL_KEY}" "QuietUninstallString"    '"$INSTDIR\uninstall.exe" /S'
@@ -78,6 +83,7 @@ SectionEnd
 ; ============================================================
 Section "Uninstall"
   ; Remove Start Menu entries
+  Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\Codex CLI.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
