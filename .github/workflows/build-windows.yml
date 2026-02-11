@@ -113,13 +113,35 @@ jobs:
         run: |
           electron_ver="${{ steps.electron-version.outputs.version }}"
 
-          # Install @electron/rebuild globally — we can't run npm install inside
-          # app_unpacked because its package.json has workspace:* references
-          # (from pnpm workspaces) that npm doesn't understand
+          # The ASAR-extracted node_modules only have macOS prebuilt binaries
+          # and are missing source/deps needed for compilation (e.g.
+          # better-sqlite3/deps/common.gypi). Reinstall from npm to get full
+          # source trees, then rebuild for Windows Electron ABI.
+
+          # Get versions from the extracted bundle
+          sqlite_ver=$(node -p "require('./app_unpacked/node_modules/better-sqlite3/package.json').version")
+          pty_ver=$(node -p "require('./app_unpacked/node_modules/node-pty/package.json').version")
+          echo "better-sqlite3=$sqlite_ver  node-pty=$pty_ver  electron=$electron_ver"
+
+          # Install fresh copies with full source (--ignore-scripts skips native build)
+          mkdir -p _native_src
+          cd _native_src
+          npm init -y
+          npm install "better-sqlite3@$sqlite_ver" "node-pty@$pty_ver" --ignore-scripts
+          cd ..
+
+          # Replace extracted modules with fresh source trees
+          rm -rf app_unpacked/node_modules/better-sqlite3
+          rm -rf app_unpacked/node_modules/node-pty
+          cp -r _native_src/node_modules/better-sqlite3 app_unpacked/node_modules/
+          cp -r _native_src/node_modules/node-pty app_unpacked/node_modules/
+          rm -rf _native_src
+
+          # Install @electron/rebuild globally (can't npm install inside
+          # app_unpacked — its package.json has workspace:* references)
           npm install -g @electron/rebuild
 
-          # Rebuild better-sqlite3 and node-pty against the Electron ABI
-          # --module-dir points to the app without npm resolving its deps
+          # Rebuild against Windows Electron ABI
           electron-rebuild \
             --version "$electron_ver" \
             --arch x64 \
