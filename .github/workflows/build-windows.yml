@@ -41,8 +41,12 @@ jobs:
       - name: Install extraction tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full dmg2img
+          sudo apt-get install -y p7zip-full dmg2img icnsutils
           npm install -g @electron/asar
+          # ImageMagick for icon conversion
+          if ! command -v magick &> /dev/null; then
+            sudo apt-get install -y imagemagick
+          fi
 
       - name: Download and extract DMG
         run: |
@@ -50,6 +54,39 @@ jobs:
           dmg2img Codex.dmg Codex.img
           mkdir -p extracted
           7z x Codex.img -oextracted/ -y >/dev/null || true
+
+      - name: Extract and convert Codex icon from DMG
+        run: |
+          # Look for the .icns icon file in the extracted app bundle
+          ICNS_PATH=$(find extracted -name "*.icns" -type f | head -1)
+          if [ -n "$ICNS_PATH" ]; then
+            echo "Found icon: $ICNS_PATH"
+            cp "$ICNS_PATH" codex-icon.icns
+            ls -lh codex-icon.icns
+            
+            # Convert .icns to .ico for Windows
+            # Try to use magick (ImageMagick) or icns2png + convert
+            if command -v magick &> /dev/null; then
+              echo "Converting .icns to .ico using ImageMagick..."
+              magick codex-icon.icns[0] codex-icon.ico
+              ls -lh codex-icon.ico
+            elif command -v icns2png &> /dev/null; then
+              echo "Converting .icns to .ico using icns2png..."
+              icns2png -x codex-icon.icns
+              # Get the largest icon and convert to ico
+              LARGEST_PNG=$(ls -S codex-icon_*.png 2>/dev/null | head -1)
+              if [ -n "$LARGEST_PNG" ] && command -v convert &> /dev/null; then
+                convert "$LARGEST_PNG" codex-icon.ico
+                ls -lh codex-icon.ico
+              fi
+            else
+              echo "⚠️  No icon conversion tools available - will try to use .icns directly or skip icon"
+            fi
+          else
+            echo "⚠️  No .icns file found in DMG - installer will use default Electron icon"
+            echo "    Looked in: extracted/"
+            find extracted -type f -name "*.icns" 2>/dev/null || echo "    (no .icns files found)"
+          fi
 
       - name: Extract ASAR
         run: |
@@ -69,6 +106,30 @@ jobs:
           mkdir -p resources resources/bin
           cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" resources/codex.exe
           cp resources/codex.exe resources/bin/codex.exe
+
+      - name: Include icon in app bundle if available
+        run: |
+          # Prefer .ico file (Windows native format), fallback to .icns
+          if [ -f "codex-icon.ico" ]; then
+            cp codex-icon.ico app_unpacked/resources/codex-icon.ico
+            echo "✅ Windows .ico icon included in app bundle"
+          elif [ -f "codex-icon.icns" ]; then
+            cp codex-icon.icns app_unpacked/resources/codex-icon.icns
+            echo "✅ macOS .icns icon included in app bundle (may not work on Windows)"
+          fi
+
+      - name: Verify .vite directory exists (critical for Electron main entry)
+        run: |
+          if [ ! -d "app_unpacked/.vite" ]; then
+            echo "❌ .vite directory missing from extracted ASAR!" >&2
+            exit 1
+          fi
+          if [ ! -f "app_unpacked/.vite/build/main.js" ]; then
+            echo "❌ .vite/build/main.js missing!" >&2
+            exit 1
+          fi
+          echo "✅ .vite directory verified"
+          ls -la app_unpacked/.vite/build/
 
       - name: Upload extracted app bundle (internal, deleted after packaging)
         uses: actions/upload-artifact@v4
@@ -177,6 +238,15 @@ jobs:
           ls -lh electron-dist/Codex.exe
           ls electron-dist/resources/app/package.json
 
+          # Verify critical .vite directory is present
+          if [ ! -d "electron-dist/resources/app/.vite" ]; then
+            echo "❌ .vite directory missing from final package!" >&2
+            echo "   Contents of resources/app:" >&2
+            ls -la electron-dist/resources/app/ >&2
+            exit 1
+          fi
+          echo "✅ .vite directory present in final package"
+
       - name: Verify native modules are PE binaries
         shell: bash
         run: |
@@ -220,6 +290,16 @@ jobs:
           app_ver="${{ steps.versions.outputs.app }}"
           mv electron-dist codex-windows-x64
 
+          # Check if icon was included - prefer .ico, fallback to .icns
+          ICON_DEFINE=""
+          if [ -f "codex-windows-x64/resources/app/resources/codex-icon.ico" ]; then
+            echo "🎨 Windows .ico icon found in app bundle"
+            ICON_DEFINE="-DAPP_ICON=resources\app\resources\codex-icon.ico"
+          elif [ -f "codex-windows-x64/resources/app/resources/codex-icon.icns" ]; then
+            echo "🎨 macOS .icns icon found in app bundle (may not display correctly)"
+            ICON_DEFINE="-DAPP_ICON=resources\app\resources\codex-icon.icns"
+          fi
+
           # NSIS is pre-installed on windows-latest at this path
           MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
           if [ ! -f "$MAKENSIS" ]; then
@@ -233,6 +313,7 @@ jobs:
           "$MAKENSIS" \
             -DAPP_VERSION="$app_ver" \
             -DSOURCE_DIR="$SOURCE_ABS" \
+            $ICON_DEFINE \
             installer/windows/codex.nsi
 
           # NSIS writes OutFile relative to .nsi location, move to repo root

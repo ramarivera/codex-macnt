@@ -22,6 +22,12 @@
 !define CLI_EXE         "resources\app\resources\bin\codex.exe"
 !define UNINSTALL_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
+; Optional: Path to custom icon (extracted from DMG or provided at build time)
+; If not defined, will use the executable's icon
+!ifndef APP_ICON
+  !define APP_ICON ""
+!endif
+
 Name "${APP_NAME} ${APP_VERSION}"
 OutFile "Codex-Setup-${APP_VERSION}-x64.exe"
 InstallDir "$LOCALAPPDATA\${APP_NAME}"
@@ -54,10 +60,20 @@ Section "Install"
 
   ; Start Menu shortcuts
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
-    "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
-  CreateShortCut "$SMPROGRAMS\${APP_NAME}\Codex CLI.lnk" \
-    "$INSTDIR\${CLI_EXE}" "" "$INSTDIR\${CLI_EXE}" 0
+
+  ; Main application shortcut - uses custom icon if available, else executable icon
+  !if "${APP_ICON}" != ""
+    CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
+      "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_ICON}" 0
+  !else
+    CreateShortCut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" \
+      "$INSTDIR\${APP_EXE}" "" "$INSTDIR\${APP_EXE}" 0
+  !endif
+
+  ; CLI shortcut (optional - comment out if not needed)
+  ; CreateShortCut "$SMPROGRAMS\${APP_NAME}\Codex CLI.lnk" \
+  ;   "$INSTDIR\${CLI_EXE}" "" "$INSTDIR\${CLI_EXE}" 0
+
   CreateShortCut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" \
     "$INSTDIR\uninstall.exe"
 
@@ -65,7 +81,14 @@ Section "Install"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName"            "${APP_NAME}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion"         "${APP_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher"               "${APP_PUBLISHER}"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon"             "$INSTDIR\${APP_EXE}"
+
+  ; Use custom icon for Add/Remove Programs if available
+  !if "${APP_ICON}" != ""
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon"           "$INSTDIR\${APP_ICON}"
+  !else
+    WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon"           "$INSTDIR\${APP_EXE}"
+  !endif
+
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation"         "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "UninstallString"         '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKCU "${UNINSTALL_KEY}" "QuietUninstallString"    '"$INSTDIR\uninstall.exe" /S'
@@ -84,7 +107,8 @@ SectionEnd
 Section "Uninstall"
   ; Remove Start Menu entries
   Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk"
-  Delete "$SMPROGRAMS\${APP_NAME}\Codex CLI.lnk"
+  ; CLI shortcut may not exist (optional), so use /REBOOTOK to suppress error
+  Delete /REBOOTOK "$SMPROGRAMS\${APP_NAME}\Codex CLI.lnk"
   Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
   RMDir "$SMPROGRAMS\${APP_NAME}"
 
