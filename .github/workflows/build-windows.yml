@@ -64,21 +64,26 @@ jobs:
             cp "$ICNS_PATH" codex-icon.icns
             ls -lh codex-icon.icns
             
-            # Convert .icns to .ico for Windows
-            # Try to use magick (ImageMagick) or icns2png + convert
-            if command -v magick &> /dev/null; then
-              echo "Converting .icns to .ico using ImageMagick..."
-              magick codex-icon.icns[0] codex-icon.ico
-              ls -lh codex-icon.ico
-            elif command -v icns2png &> /dev/null; then
+            # Convert .icns to .ico for Windows - resize to 256x256 max for Windows compatibility
+            if command -v icns2png &> /dev/null; then
               echo "Converting .icns to .ico using icns2png..."
               icns2png -x codex-icon.icns
-              # Get the largest icon and convert to ico
-              LARGEST_PNG=$(ls -S codex-icon_*.png 2>/dev/null | head -1)
-              if [ -n "$LARGEST_PNG" ] && command -v convert &> /dev/null; then
-                convert "$LARGEST_PNG" codex-icon.ico
+              # Find 256x256 or smaller icon (Windows ICO size limit)
+              TARGET_PNG=$(ls codex-icon_*.png 2>/dev/null | grep -E "(256x256|128x128|64x64|32x32)" | head -1)
+              if [ -z "$TARGET_PNG" ]; then
+                # Fallback to largest if no standard size found
+                TARGET_PNG=$(ls -S codex-icon_*.png 2>/dev/null | head -1)
+              fi
+              if [ -n "$TARGET_PNG" ] && command -v convert &> /dev/null; then
+                echo "Using $TARGET_PNG for icon conversion"
+                convert "$TARGET_PNG" -resize 256x256 codex-icon.ico
                 ls -lh codex-icon.ico
               fi
+            elif command -v magick &> /dev/null; then
+              echo "Converting .icns to .ico using ImageMagick..."
+              # Use first frame and resize to 256x256 max for Windows
+              magick codex-icon.icns[0] -resize 256x256 codex-icon.ico
+              ls -lh codex-icon.ico
             else
               echo "⚠️  No icon conversion tools available - will try to use .icns directly or skip icon"
             fi
