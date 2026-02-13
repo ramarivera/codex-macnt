@@ -8,7 +8,7 @@ jq = "latest"
 WORKDIR = "{{env.HOME}}/.cache/codex-linux-port"
 CODEX_DMG_URL = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 ENABLE_LINUX_UI_POLISH = "1"
-CODEX_GIT_REF = "rust-v0.99.0-alpha.16"
+CODEX_GIT_REF = "rust-v0.102.0-alpha.5"
 
 [tasks."codex:docker-build"]
 description = "Build codex-builder Docker image"
