@@ -136,11 +136,17 @@ jobs:
           echo "✅ .vite directory verified"
           ls -la app_unpacked/.vite/build/
 
+      - name: Tar app bundle (preserve hidden .vite directory)
+        run: |
+          echo "Creating tar archive of app_unpacked..."
+          tar -czf app-unpacked.tar.gz app_unpacked/
+          ls -lh app-unpacked.tar.gz
+
       - name: Upload extracted app bundle (internal, deleted after packaging)
         uses: actions/upload-artifact@v4
         with:
           name: app-unpacked
-          path: app_unpacked/
+          path: app-unpacked.tar.gz
           retention-days: 1
 
   # Stage 2: Native modules + packaging on Windows
@@ -159,7 +165,15 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: app-unpacked
-          path: app_unpacked/
+
+      - name: Extract app bundle
+        shell: bash
+        run: |
+          echo "Extracting app bundle from tar archive..."
+          tar -xzf app-unpacked.tar.gz
+          ls -la app_unpacked/
+          echo "Checking .vite directory..."
+          ls -la app_unpacked/.vite/
 
       - name: Determine Electron version
         id: electron-version
