@@ -1085,6 +1085,81 @@ echo "Run GUI: {{config_root}}/Codex.AppImage"
 echo "Run CLI: {{config_root}}/Codex.AppImage --cli --help"
 """
 
+# ── Linux x64 build tasks ───────────────────────────────────────────────────
+# Build Linux CLI binary locally and commit for GitHub Actions
+
+[tasks."codex:linux:compile"]
+description = "Build Linux codex binary and stage at dist/linux-x64/ for commit"
+run = """
+set -euo pipefail
+docker_output_dir="{{env.WORKDIR}}/docker-output-linux"
+dist_dir="{{config_root}}/dist/linux-x64"
+mkdir -p "$docker_output_dir"
+
+docker run --rm \
+  --entrypoint bash \
+  -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
+  -v "$docker_output_dir:/output" \
+  codex-builder -c '
+set -euo pipefail
+mkdir -p /output/work
+cd /output/work
+
+rm -rf codex-src
+git clone https://github.com/openai/codex.git codex-src >/dev/null
+
+cd codex-src
+if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
+  git fetch --tags --force >/dev/null 2>&1 || true
+  SELECTED_TAG=""
+  for tag in $(git tag --sort=-v:refname | head -n 200); do
+    git checkout --detach "$tag" >/dev/null 2>&1 || continue
+    if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+      SELECTED_TAG="$tag"
+      break
+    fi
+  done
+  if [ -z "$SELECTED_TAG" ]; then
+    echo "No buildable codex ref found" >&2
+    exit 1
+  fi
+else
+  git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
+  git checkout --detach FETCH_HEAD >/dev/null
+  if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+    echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
+    exit 1
+  fi
+fi
+
+cd codex-rs
+echo "Building codex CLI for Linux x86_64..."
+cargo build --release --bin codex
+cargo build --release --bin codex-linux-sandbox || true
+
+cp target/release/codex /output/codex
+if [ -f target/release/codex-linux-sandbox ]; then
+  cp target/release/codex-linux-sandbox /output/codex-linux-sandbox
+fi
+echo "Linux codex binary built successfully"
+'
+
+mkdir -p "$dist_dir"
+cp -f "$docker_output_dir/codex" "$dist_dir/codex"
+if [ -f "$docker_output_dir/codex-linux-sandbox" ]; then
+  cp -f "$docker_output_dir/codex-linux-sandbox" "$dist_dir/codex-linux-sandbox"
+fi
+file "$dist_dir/codex" | grep -qi "ELF\|Linux"
+
+echo ""
+echo "✅ Linux codex binary staged at: dist/linux-x64/codex"
+echo ""
+echo "Next steps:"
+echo "  git add dist/linux-x64/"
+echo "  git commit -m \"chore: update Linux codex binary\""
+echo "  git push"
+"""
+
 # ── Windows x64 cross-compile tasks ──────────────────────────────────────────
 # These tasks cross-compile the Rust CLI for Windows from Linux using MinGW.
 # The binary is committed to dist/windows-x64/codex.exe so that GitHub Actions

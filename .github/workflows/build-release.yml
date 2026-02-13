@@ -1,0 +1,454 @@
+# Unified Codex Build and Release Workflow
+#
+# Builds both Windows installer and Linux AppImage in parallel
+# Creates a combined GitHub release with both artifacts
+#
+# Trigger: Push CLI binaries to dist/ directory
+#   mise run codex:win:compile   # Build Windows CLI
+#   mise run codex:linux:compile # Build Linux CLI
+#   git add dist/ && git commit && git push
+
+name: Build and Release Codex
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "dist/windows-x64/codex.exe"
+      - "dist/linux-x64/codex"
+      - ".github/workflows/build-release.yml"
+
+env:
+  CODEX_DMG_URL: "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # SHARED: Extract and prepare app resources from DMG (runs once)
+  # ═══════════════════════════════════════════════════════════════════════════
+  extract:
+    runs-on: ubuntu-latest
+    outputs:
+      electron_version: ${{ steps.get-versions.outputs.electron_version }}
+      app_version: ${{ steps.get-versions.outputs.app_version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify CLI binaries exist
+        run: |
+          if [ ! -f dist/windows-x64/codex.exe ]; then
+            echo "❌ dist/windows-x64/codex.exe not found" >&2
+            exit 1
+          fi
+          if [ ! -f dist/linux-x64/codex ]; then
+            echo "❌ dist/linux-x64/codex not found" >&2
+            exit 1
+          fi
+          echo "✅ Both CLI binaries present"
+          file dist/windows-x64/codex.exe
+          file dist/linux-x64/codex
+
+      - name: Install extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full dmg2img icnsutils imagemagick
+          npm install -g @electron/asar
+
+      - name: Download and extract DMG
+        run: |
+          curl -L --fail -o Codex.dmg "$CODEX_DMG_URL"
+          dmg2img Codex.dmg Codex.img
+          mkdir -p extracted
+          7z x Codex.img -oextracted/ -y >/dev/null || true
+
+      - name: Extract and convert Codex icon
+        run: |
+          ICNS_PATH=$(find extracted -name "*.icns" -type f | head -1)
+          if [ -n "$ICNS_PATH" ]; then
+            echo "Found icon: $ICNS_PATH"
+            cp "$ICNS_PATH" codex-icon.icns
+            
+            # Convert to ICO (256x256 max for Windows)
+            if command -v icns2png &> /dev/null; then
+              icns2png -x codex-icon.icns
+              TARGET_PNG=$(ls codex-icon_*.png 2>/dev/null | grep -E "256x256" | head -1)
+              if [ -z "$TARGET_PNG" ]; then
+                TARGET_PNG=$(ls -S codex-icon_*.png 2>/dev/null | head -1)
+              fi
+              if [ -n "$TARGET_PNG" ]; then
+                convert "$TARGET_PNG" -resize 256x256 codex-icon.ico
+                echo "✅ Created codex-icon.ico"
+              fi
+            fi
+          fi
+
+      - name: Extract ASAR
+        run: |
+          ASAR_PATH=$(find extracted -name app.asar -type f | head -1)
+          if [ -z "$ASAR_PATH" ]; then
+            echo "❌ Could not locate app.asar" >&2
+            exit 1
+          fi
+          asar extract "$ASAR_PATH" app_unpacked/
+
+      - name: Get versions
+        id: get-versions
+        run: |
+          cd app_unpacked
+          electron_ver=$(node -p "require('./package.json').devDependencies?.electron || ''" 2>/dev/null || true)
+          electron_ver="${electron_ver#^}"
+          app_ver=$(node -p "require('./package.json').version" 2>/dev/null || echo "unknown")
+          echo "electron_version=$electron_ver" >> "$GITHUB_OUTPUT"
+          echo "app_version=$app_ver" >> "$GITHUB_OUTPUT"
+          echo "Electron: $electron_ver, App: $app_ver"
+
+      - name: Verify .vite directory
+        run: |
+          if [ ! -d "app_unpacked/.vite" ] || [ ! -f "app_unpacked/.vite/build/main.js" ]; then
+            echo "❌ .vite directory missing from extracted ASAR!" >&2
+            exit 1
+          fi
+          echo "✅ .vite directory verified"
+
+      - name: Prepare shared artifacts
+        run: |
+          # Tar the app bundle to preserve hidden .vite directory
+          tar -czf app-unpacked.tar.gz app_unpacked/
+          ls -lh app-unpacked.tar.gz
+
+      - name: Upload app bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-unpacked
+          path: app-unpacked.tar.gz
+          retention-days: 1
+
+      - name: Upload icon
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-icon
+          path: codex-icon.ico
+          retention-days: 1
+          if-no-files-found: ignore
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # WINDOWS: Build Windows installer
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-windows:
+    needs: extract
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Extract app bundle
+        shell: bash
+        run: |
+          tar -xzf app-unpacked/app-unpacked.tar.gz
+          ls -la app_unpacked/
+          ls -la app_unpacked/.vite/ 2>/dev/null || echo "⚠️  .vite not found"
+
+      - name: Rebuild native modules for Windows
+        shell: bash
+        run: |
+          electron_ver="${{ needs.extract.outputs.electron_version }}"
+          
+          # Get module versions
+          sqlite_ver=$(node -p "require('./app_unpacked/node_modules/better-sqlite3/package.json').version")
+          pty_ver=$(node -p "require('./app_unpacked/node_modules/node-pty/package.json').version")
+          echo "Rebuilding better-sqlite3=$sqlite_ver node-pty=$pty_ver for Electron $electron_ver"
+          
+          # Reinstall with full source
+          mkdir -p _native_src
+          cd _native_src
+          npm init -y
+          npm install "better-sqlite3@$sqlite_ver" "node-pty@$pty_ver" --ignore-scripts
+          cd ..
+          
+          # Replace modules
+          rm -rf app_unpacked/node_modules/better-sqlite3
+          rm -rf app_unpacked/node_modules/node-pty
+          cp -r _native_src/node_modules/better-sqlite3 app_unpacked/node_modules/
+          cp -r _native_src/node_modules/node-pty app_unpacked/node_modules/
+          rm -rf _native_src
+          
+          # Rebuild
+          npm install -g @electron/rebuild
+          electron-rebuild \
+            --version "$electron_ver" \
+            --arch x64 \
+            --module-dir ./app_unpacked \
+            --only better-sqlite3,node-pty \
+            --build-from-source
+
+      - name: Download Electron and assemble
+        shell: bash
+        run: |
+          electron_ver="${{ needs.extract.outputs.electron_version }}"
+          echo "Downloading Electron v${electron_ver} win32-x64..."
+          curl -sL --fail -o electron.zip \
+            "https://github.com/electron/electron/releases/download/v${electron_ver}/electron-v${electron_ver}-win32-x64.zip"
+          
+          mkdir -p electron-dist
+          unzip -q electron.zip -d electron-dist
+          rm -f electron-dist/resources/default_app.asar
+          mv app_unpacked electron-dist/resources/app
+          mv electron-dist/electron.exe electron-dist/Codex.exe
+          
+          # Copy Windows CLI binary
+          cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" electron-dist/resources/app/resources/codex.exe
+          cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/resources/bin/codex.exe
+          
+          # Copy icon if available
+          if [ -f "codex-icon/codex-icon.ico" ]; then
+            cp codex-icon/codex-icon.ico electron-dist/resources/app/resources/codex-icon.ico
+          fi
+          
+          ls -lh electron-dist/Codex.exe
+
+      - name: Verify native modules
+        shell: bash
+        run: |
+          APP=electron-dist/resources/app
+          file "$APP/resources/codex.exe" | grep -i "PE32"
+          find "$APP/node_modules/better-sqlite3" -name "*.node" -exec file {} \; | head -1
+          find "$APP/node_modules/node-pty" -name "*.node" -exec file {} \; | head -1
+
+      - name: Build NSIS installer
+        shell: bash
+        run: |
+          app_ver="${{ needs.extract.outputs.app_version }}"
+          mv electron-dist codex-windows-x64
+          
+          ICON_DEFINE=""
+          if [ -f "codex-windows-x64/resources/app/resources/codex-icon.ico" ]; then
+            ICON_DEFINE="-DAPP_ICON=resources\app\resources\codex-icon.ico"
+          fi
+          
+          MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          if [ ! -f "$MAKENSIS" ]; then
+            choco install nsis -y --no-progress
+            MAKENSIS="/c/Program Files (x86)/NSIS/makensis.exe"
+          fi
+          
+          SOURCE_ABS="$(cygpath -w "$(pwd)/codex-windows-x64")"
+          "$MAKENSIS" \
+            -DAPP_VERSION="$app_ver" \
+            -DSOURCE_DIR="$SOURCE_ABS" \
+            $ICON_DEFINE \
+            installer/windows/codex.nsi
+          
+          mv installer/windows/Codex-Setup-*.exe Codex-Setup-Windows-x64.exe
+          ls -lh Codex-Setup-Windows-x64.exe
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: Codex-Setup-Windows-x64.exe
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # LINUX: Build Linux AppImage
+  # ═══════════════════════════════════════════════════════════════════════════
+  build-linux:
+    needs: extract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse2 file
+          npm install -g @electron/asar
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Extract app bundle
+        run: |
+          tar -xzf app-unpacked/app-unpacked.tar.gz
+          ls -la app_unpacked/
+          ls -la app_unpacked/.vite/
+
+      - name: Prepare AppDir
+        run: |
+          mkdir -p AppDir/usr/share/codex AppDir/usr/bin
+          cp -a app_unpacked/. AppDir/usr/share/codex/
+          
+          # Copy Linux CLI binary
+          cp "$GITHUB_WORKSPACE/dist/linux-x64/codex" AppDir/usr/share/codex/resources/codex
+          cp AppDir/usr/share/codex/resources/codex AppDir/usr/share/codex/resources/bin/codex
+          chmod +x AppDir/usr/share/codex/resources/codex
+          chmod +x AppDir/usr/share/codex/resources/bin/codex
+          
+          # Copy sandbox if available
+          if [ -f "$GITHUB_WORKSPACE/dist/linux-x64/codex-linux-sandbox" ]; then
+            cp "$GITHUB_WORKSPACE/dist/linux-x64/codex-linux-sandbox" AppDir/usr/share/codex/resources/
+            chmod +x AppDir/usr/share/codex/resources/codex-linux-sandbox
+          fi
+          
+          # Create symlinks
+          ln -sf ../share/codex/resources/codex AppDir/usr/bin/codex
+          
+          # AppRun script
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          APP_DIR="${HERE}/usr/share/codex"
+          export PATH="${APP_DIR}/resources:${APP_DIR}/resources/bin:${PATH}"
+          export CODEX_CLI_PATH="${APP_DIR}/resources/bin/codex"
+          
+          if [ "${1:-}" = "--cli" ]; then
+            shift
+            exec "${CODEX_CLI_PATH}" "$@"
+          fi
+          
+          if command -v electron >/dev/null 2>&1; then
+            exec electron "${APP_DIR}" "$@"
+          fi
+          
+          echo "Electron not found on host."
+          echo "Run CLI mode with: ./Codex.AppImage --cli --help"
+          exit 1
+          EOF
+          chmod +x AppDir/AppRun
+          
+          # Desktop file
+          cat > AppDir/codex.desktop <<'EOF'
+          [Desktop Entry]
+          Name=Codex
+          GenericName=AI Coding Assistant
+          Comment=OpenAI Codex - AI-powered coding assistant
+          Exec=AppRun
+          Icon=codex
+          Terminal=false
+          Type=Application
+          Categories=Development;IDE;TextEditor;
+          Keywords=codex;ai;code;editor;openai;
+          EOF
+          
+          # Icon
+          icon_src=$(ls AppDir/usr/share/codex/webview/assets/app-*.png 2>/dev/null | head -1 || true)
+          if [ -z "$icon_src" ]; then
+            icon_src=$(ls AppDir/usr/share/codex/webview/assets/logo-*.png 2>/dev/null | head -1 || true)
+          fi
+          if [ -n "$icon_src" ]; then
+            cp "$icon_src" AppDir/codex.png
+          fi
+          
+          ls -la AppDir/
+
+      - name: Download appimagetool
+        run: |
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage"
+          chmod +x appimagetool
+
+      - name: Build AppImage
+        run: |
+          ARCH=x86_64 ./appimagetool AppDir Codex-x86_64.AppImage
+          ls -lh Codex-x86_64.AppImage
+          file Codex-x86_64.AppImage
+
+      - name: Test AppImage CLI
+        run: |
+          chmod +x Codex-x86_64.AppImage
+          ./Codex-x86_64.AppImage --cli --version || true
+
+      - name: Upload Linux AppImage
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: Codex-x86_64.AppImage
+          retention-days: 30
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # RELEASE: Create combined GitHub release with both artifacts
+  # ═══════════════════════════════════════════════════════════════════════════
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display artifacts
+        run: |
+          echo "Artifacts downloaded:"
+          find artifacts -type f -ls
+
+      - name: Get CLI versions
+        id: versions
+        run: |
+          # Try to extract versions from binaries
+          win_cli_ver=$(file dist/windows-x64/codex.exe 2>/dev/null | grep -oP '\d+\.\d+\.\d+[^)]*' | head -1 || echo "unknown")
+          linux_cli_ver=$(strings dist/linux-x64/codex 2>/dev/null | grep -oP '\d+\.\d+\.\d+[^ ]*' | head -1 || echo "unknown")
+          echo "windows_cli=$win_cli_ver" >> "$GITHUB_OUTPUT"
+          echo "linux_cli=$linux_cli_ver" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/windows-installer/*.exe
+            artifacts/linux-appimage/*.AppImage
+          name: "Codex ${{ github.ref_name }}"
+          body: |
+            ## Codex Release ${{ github.ref_name }}
+            
+            ### Downloads
+            - **Windows**: `Codex-Setup-Windows-x64.exe` - NSIS installer
+            - **Linux**: `Codex-x86_64.AppImage` - AppImage (make executable and run)
+            
+            ### Usage
+            **Windows:**
+            ```powershell
+            # Install
+            .\Codex-Setup-Windows-x64.exe
+            
+            # Run
+            Codex
+            ```
+            
+            **Linux:**
+            ```bash
+            # Make executable
+            chmod +x Codex-x86_64.AppImage
+            
+            # Run GUI
+            ./Codex-x86_64.AppImage
+            
+            # Run CLI
+            ./Codex-x86_64.AppImage --cli --help
+            ```
+            
+            ### Versions
+            - App: ${{ needs.extract.outputs.app_version }}
+            - CLI: Built from ${{ env.CODEX_GIT_REF }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cleanup intermediate artifacts
+        if: always()
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: |
+            app-unpacked
+            codex-icon
