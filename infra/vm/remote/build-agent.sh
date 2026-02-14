@@ -57,6 +57,58 @@ mkdir -p "$CODEX_VM_BASE_DIR" "$CODEX_VM_BASE_MEDIA_DIR" "$ARTIFACT_ROOT"
 log() { printf '[codex-vm:remote] %s\n' "$*" >&2; }
 fatal() { printf '[codex-vm:remote] ERROR: %s\n' "$*" >&2; exit 1; }
 
+port_is_free() {
+  local port="$1"
+  # Use a bind test (no root required) to detect whether something already
+  # listens on the host port. This prevents NAT port-forward rules that appear
+  # configured but never actually work due to collisions (common cause of
+  # "connection reset by peer" on 127.0.0.1:<forwarded-port>).
+  python3 - "$port" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+  s.bind(("0.0.0.0", port))
+  ok = True
+except OSError:
+  ok = False
+finally:
+  try: s.close()
+  except Exception: pass
+sys.exit(0 if ok else 1)
+PY
+}
+
+pick_free_port() {
+  local preferred="$1"
+  local port="$preferred"
+  local attempt=0
+
+  if [[ -z "$port" ]]; then
+    port="2222"
+  fi
+
+  # Try preferred, then walk up a small range, then fall back to an ephemeral
+  # port chosen by the kernel.
+  while ((attempt < 100)); do
+    if port_is_free "$port"; then
+      echo "$port"
+      return 0
+    fi
+    port=$((port + 1))
+    attempt=$((attempt + 1))
+  done
+
+  python3 - <<'PY'
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.bind(("0.0.0.0", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+}
+
 ensure_usable_guest_key() {
   local candidate_key="$1"
   local generated_key="$CODEX_VM_BASE_DIR/.codex-vm/guest-key"
@@ -422,6 +474,10 @@ vm_refresh() {
 vm_set_nat_ssh() {
   local vm="$1"
   local port="$2"
+
+  if ! port_is_free "$port"; then
+    fatal "requested host SSH forward port is already in use on VM host: $port"
+  fi
 
   # When a VM is running or has an active session, `modifyvm` can fail with a lock error.
   # `controlvm ... natpf1` works on a running VM without needing an exclusive write lock.
@@ -928,6 +984,12 @@ check_host() {
 run_linux() {
   CODEX_VM_GUEST_PASSWORD="${CODEX_VM_GUEST_PASSWORD:-$CODEX_VM_LINUX_GUEST_PASSWORD}"
 
+  local preferred_port="$CODEX_VM_LINUX_SSH_PORT"
+  CODEX_VM_LINUX_SSH_PORT="$(pick_free_port "$preferred_port")"
+  if [[ "$CODEX_VM_LINUX_SSH_PORT" != "$preferred_port" ]]; then
+    log "Linux SSH forward port $preferred_port is busy; using $CODEX_VM_LINUX_SSH_PORT instead"
+  fi
+
   vm_prepare "$CODEX_VM_LINUX_VM_NAME" "$CODEX_VM_LINUX_BASE_OVA" "$CODEX_VM_LINUX_BASE_ISO" \
     "$CODEX_VM_LINUX_VM_CPUS" "$CODEX_VM_LINUX_VM_MEMORY_MB" "$CODEX_VM_LINUX_VM_DISK_GB" "$CODEX_VM_LINUX_VM_OSTYPE" \
     "$CODEX_VM_LINUX_SSH_PORT" "$CODEX_VM_LINUX_GUEST_USER" "$CODEX_VM_LINUX_GUEST_PASSWORD"
@@ -955,6 +1017,12 @@ run_linux() {
 
 run_windows() {
   CODEX_VM_GUEST_PASSWORD="${CODEX_VM_GUEST_PASSWORD:-$CODEX_VM_WINDOWS_GUEST_PASSWORD}"
+
+  local preferred_port="$CODEX_VM_WINDOWS_SSH_PORT"
+  CODEX_VM_WINDOWS_SSH_PORT="$(pick_free_port "$preferred_port")"
+  if [[ "$CODEX_VM_WINDOWS_SSH_PORT" != "$preferred_port" ]]; then
+    log "Windows SSH forward port $preferred_port is busy; using $CODEX_VM_WINDOWS_SSH_PORT instead"
+  fi
 
   vm_prepare "$CODEX_VM_WINDOWS_VM_NAME" "$CODEX_VM_WINDOWS_BASE_OVA" "$CODEX_VM_WINDOWS_BASE_ISO" \
     "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$CODEX_VM_WINDOWS_VM_OSTYPE" \
