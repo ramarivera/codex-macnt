@@ -587,7 +587,21 @@ vm_create_from_iso() {
   post_install_command+="systemctl enable ssh --now || true"
 
   VBoxManage createvm --name "$vm" --ostype "$ostype" --register >/dev/null
-  VBoxManage modifyvm "$vm" --cpus "$cpus" --memory "$memory" --ioapic on --vram 64 >/dev/null
+  # Use VMSVGA for modern Linux guests; VBoxVGA is legacy and has caused kernel crashes
+  # with newer Ubuntu kernels + vboxvideo/drm stack.
+  local gfx="vmsvga"
+  if [[ "$ostype" == Windows* ]]; then
+    gfx="vboxsvga"
+  fi
+
+  VBoxManage modifyvm "$vm" \
+    --cpus "$cpus" \
+    --memory "$memory" \
+    --ioapic on \
+    --graphicscontroller "$gfx" \
+    --vram 64 \
+    --audio none \
+    >/dev/null
 
   local disk_path="$CODEX_VM_BASE_DIR/disks/${vm}.vdi"
   VBoxManage createmedium disk --filename "$disk_path" --size "$((disk_gb * 1024))" --format VDI >/dev/null
