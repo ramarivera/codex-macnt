@@ -364,6 +364,28 @@ vm_wait_for_guest_login() {
       fi
     fi
 
+    if [[ -n "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
+      local askpass_script=""
+      askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
+      if SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:1 \
+        setsid ssh \
+          -o PreferredAuthentications=password \
+          -o PubkeyAuthentication=no \
+          -o PasswordAuthentication=yes \
+          -o KbdInteractiveAuthentication=no \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o GlobalKnownHostsFile=/dev/null \
+          -o ConnectTimeout=10 \
+          -o BatchMode=no \
+          -p "$port" \
+          "$user@127.0.0.1" "echo codex-vm-ready" >/dev/null 2>&1; then
+        rm -f "$askpass_script"
+        return 0
+      fi
+      rm -f "$askpass_script"
+    fi
+
     if (( (i - last_log) >= 30 )); then
       log "Waiting for guest SSH login: ${user}@127.0.0.1:${port} (${i}s/${timeout}s)"
       last_log="$i"
@@ -541,7 +563,9 @@ vm_create_from_iso() {
               print "    - echo codex-vm-ensure-ssh"
               print "    - curtin in-target --target=/target -- apt-get update"
               print "    - curtin in-target --target=/target -- apt-get install -y openssh-server"
+              print "    - curtin in-target --target=/target -- /bin/sh -lc \"mkdir -p /etc/ssh/sshd_config.d && printf %s\\\\n PasswordAuthentication\\\\ yes ChallengeResponseAuthentication\\\\ yes PubkeyAuthentication\\\\ yes > /etc/ssh/sshd_config.d/99-codex-vm-auth.conf\""
               print "    - curtin in-target --target=/target -- systemctl enable ssh --now || true"
+              print "    - curtin in-target --target=/target -- systemctl restart ssh || true"
             }
           }
         ' "$script_template" > "$template_tmp"
