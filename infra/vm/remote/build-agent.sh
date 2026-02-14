@@ -296,7 +296,7 @@ vm_wait_for_session_free() {
 
 vm_wait_for_port() {
   local port="$1"
-  local timeout=240
+  local timeout="${2:-240}"
   local i=0
   while ((i < timeout)); do
     if command -v nc >/dev/null 2>&1; then
@@ -315,7 +315,7 @@ vm_wait_for_port() {
 vm_wait_for_ssh_server() {
   local port="$1"
   local user="${2:-root}"
-  local timeout=240
+  local timeout="${3:-240}"
   local i=0
   local out=""
 
@@ -622,8 +622,8 @@ vm_prepare() {
     tcp_timeout="${CODEX_VM_TCP_READY_TIMEOUT:-1800}"
   fi
 
-  vm_wait_for_port "$port" || fatal "guest TCP port did not become ready on port $port"
-  vm_wait_for_ssh_server "$port" "$user" || fatal "guest SSH server did not become ready on port $port"
+  vm_wait_for_port "$port" "$tcp_timeout" || fatal "guest TCP port did not become ready on port $port (timeout ${tcp_timeout}s)"
+  vm_wait_for_ssh_server "$port" "$user" "$ssh_timeout" || fatal "guest SSH server did not become ready on port $port (timeout ${ssh_timeout}s)"
   vm_wait_for_guest_login "$user" "$port" "$login_timeout" || fatal "guest SSH login did not become ready on port $port (timeout ${login_timeout}s)"
 }
 
