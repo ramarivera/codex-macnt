@@ -10,6 +10,26 @@ CODEX_DMG_URL = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 ENABLE_LINUX_UI_POLISH = "1"
 CODEX_GIT_REF = "rust-v0.102.0-alpha.5"
 
+[tasks."codex:vm:check"]
+description = "Run remote VM preflight checks"
+run = "bash infra/vm/codex-vm check"
+
+[tasks."codex:vm:linux:build"]
+description = "Build Codex AppImage on remote Linux VM"
+run = "bash infra/vm/codex-vm linux"
+
+[tasks."codex:vm:win:build"]
+description = "Build Windows installer on remote Windows VM"
+run = "bash infra/vm/codex-vm win"
+
+[tasks."codex:vm:build"]
+description = "Build Linux and Windows artifacts via remote VM orchestrator"
+run = "bash infra/vm/codex-vm both"
+
+[tasks."codex:vm:release"]
+description = "Run remote VM build and keep artifacts locally"
+run = "bash infra/vm/codex-vm release"
+
 [tasks."codex:docker-build"]
 description = "Build codex-builder Docker image"
 run = "docker build -t codex-builder {{config_root}}"

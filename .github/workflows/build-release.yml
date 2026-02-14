@@ -434,6 +434,10 @@ jobs:
             artifacts/linux-appimage/*.AppImage
           name: "Codex ${{ github.ref_name }}"
           body: |
+            ## Unofficial community build notice
+            This repository is a community-maintained project and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex.
+            It is a hobby/independent packaging effort with independently produced installers.
+
             ## Codex Release ${{ github.ref_name }}
             
             ### Downloads

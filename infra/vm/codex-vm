@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(dirname "$(dirname "$SCRIPT_DIR")")
+DEFAULT_CONFIG="$HOME/.config/codex-vm/config.toml"
+CONFIG_PATH="${CODEX_VM_CONFIG:-$DEFAULT_CONFIG}"
+TMP_DIR="${TMPDIR:-/tmp}"
+
+log() { printf '[codex-vm] %s\n' "$*"; }
+fatal() { printf '[codex-vm] ERROR: %s\n' "$*" >&2; exit 1; }
+usage_missing_config() {
+  cat >&2 <<'EOF'
+[codex-vm] ERROR: missing required settings (remote host config)
+
+To get started:
+  mkdir -p ~/.config/codex-vm
+  cp infra/vm/config.example.toml ~/.config/codex-vm/config.toml
+  $EDITOR ~/.config/codex-vm/config.toml
+
+At minimum, set:
+  host, user, ssh_key
+
+Alternatively, you can set env vars:
+  CODEX_VM_HOST, CODEX_VM_USER, CODEX_VM_HOST_KEY
+EOF
+  exit 1
+}
+
+read_toml_value() {
+  local key="$1"
+  local file="$2"
+  [ -f "$file" ] || return 0
+
+  local line value
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*= ]]; then
+      value="${line#*=}"
+      value="${value##*( )}"
+      value="${value%%*( )}"
+      value="${value%$'\r'}"
+      case "$value" in
+        \"*\" ) value="${value:1:${#value}-2}" ;;
+        \'*\' ) value="${value:1:${#value}-2}" ;;
+      esac
+      echo "$value"
+      return 0
+    fi
+  done < "$file"
+}
+
+load_setting() {
+  local key="$1"
+  local var_name="$2"
+  local default_value="${3-}"
+
+  local current="${!var_name-}"
+  local from_file
+
+  if [ -n "$current" ]; then
+    return 0
+  fi
+
+  from_file="$(read_toml_value "$key" "$CONFIG_PATH" || true)"
+  if [ -n "$from_file" ]; then
+    printf -v "$var_name" '%s' "$from_file"
+    return 0
+  fi
+
+  if [ -n "$default_value" ]; then
+    printf -v "$var_name" '%s' "$default_value"
+    return 0
+  fi
+
+  printf -v "$var_name" '%s' ""
+  return 0
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || fatal "required command missing: $1"
+}
+
+expand_home() {
+  local value="$1"
+  echo "${value/#~/$HOME}"
+}
+
+shell_escape_single() {
+  sed "s/'/'\\''/g"
+}
+
+run_remote_action() {
+  local action="$1"
+  local run_id="$2"
+
+  local local_output_dir="$CODEX_VM_LOCAL_OUTPUT_DIR"
+  [ -n "$local_output_dir" ] || local_output_dir="$REPO_ROOT/infra/vm/artifacts"
+  if [[ "$local_output_dir" != /* ]]; then
+    local_output_dir="$REPO_ROOT/$local_output_dir"
+  fi
+
+  require_cmd ssh
+  require_cmd scp
+  require_cmd rsync
+
+  ssh_host() {
+    local command="$1"
+    ssh -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -p "$CODEX_VM_HOST_SSH_PORT" "$remote_host" "/bin/bash -lc \"$command\""
+  }
+
+  local remote_host="$CODEX_VM_USER@$CODEX_VM_HOST"
+  local remote_tmp_script="/tmp/codex-vm-build-agent.sh"
+  local remote_tmp_env="/tmp/codex-vm-build-agent.env"
+
+  local tmp_env
+  tmp_env=$(mktemp "$TMP_DIR/codex-vm-env.XXXXXX")
+
+  local remote_home
+  remote_home="$(ssh -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -p "$CODEX_VM_HOST_SSH_PORT" "$remote_host" "sh -lc 'printf \"%s\" \"$HOME\"'")"
+  if [ -z "$remote_home" ] || [ ! -d "$remote_home" ] || [ ! -w "$(dirname "$remote_home" 2>/dev/null || true)" ]; then
+    remote_home="/home/$CODEX_VM_USER"
+  fi
+
+  if [[ "$CODEX_VM_BASE_DIR" == "~/"* ]]; then
+    CODEX_VM_BASE_DIR="${CODEX_VM_BASE_DIR/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_ARTIFACT_DIR" == "~/"* ]]; then
+    CODEX_VM_ARTIFACT_DIR="${CODEX_VM_ARTIFACT_DIR/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_ARTIFACT_DIR" == '$HOME/'* ]]; then
+    CODEX_VM_ARTIFACT_DIR="${CODEX_VM_ARTIFACT_DIR/#'$HOME'/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_BASE_DIR" == '$HOME/'* ]]; then
+    CODEX_VM_BASE_DIR="${CODEX_VM_BASE_DIR/#'$HOME'/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_GUEST_KEY" == "~/"* ]]; then
+    CODEX_VM_GUEST_KEY="${CODEX_VM_GUEST_KEY/#~/$remote_home}"
+  elif [[ "$CODEX_VM_GUEST_KEY" == '$HOME/'* ]]; then
+    CODEX_VM_GUEST_KEY="${CODEX_VM_GUEST_KEY/#'$HOME'/$remote_home}"
+  elif [[ "$CODEX_VM_GUEST_KEY" == "/Users/"* ]]; then
+    CODEX_VM_GUEST_KEY="$remote_home/${CODEX_VM_GUEST_KEY#/Users/*/}"
+  fi
+  if [[ "$CODEX_VM_WINDOWS_ISO_PATH" == "~/"* ]]; then
+    CODEX_VM_WINDOWS_ISO_PATH="${CODEX_VM_WINDOWS_ISO_PATH/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_LINUX_BASE_ISO" == "~/"* ]]; then
+    CODEX_VM_LINUX_BASE_ISO="${CODEX_VM_LINUX_BASE_ISO/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_WINDOWS_BASE_ISO" == "~/"* ]]; then
+    CODEX_VM_WINDOWS_BASE_ISO="${CODEX_VM_WINDOWS_BASE_ISO/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_LINUX_BASE_OVA" == "~/"* ]]; then
+    CODEX_VM_LINUX_BASE_OVA="${CODEX_VM_LINUX_BASE_OVA/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_WINDOWS_BASE_OVA" == "~/"* ]]; then
+    CODEX_VM_WINDOWS_BASE_OVA="${CODEX_VM_WINDOWS_BASE_OVA/#~/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_WINDOWS_BASE_OVA" == '$HOME/'* ]]; then
+    CODEX_VM_WINDOWS_BASE_OVA="${CODEX_VM_WINDOWS_BASE_OVA/#'$HOME'/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_LINUX_BASE_OVA" == '$HOME/'* ]]; then
+    CODEX_VM_LINUX_BASE_OVA="${CODEX_VM_LINUX_BASE_OVA/#'$HOME'/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_WINDOWS_BASE_ISO" == '$HOME/'* ]]; then
+    CODEX_VM_WINDOWS_BASE_ISO="${CODEX_VM_WINDOWS_BASE_ISO/#'$HOME'/$remote_home}"
+  fi
+  if [[ "$CODEX_VM_LINUX_BASE_ISO" == '$HOME/'* ]]; then
+    CODEX_VM_LINUX_BASE_ISO="${CODEX_VM_LINUX_BASE_ISO/#'$HOME'/$remote_home}"
+  fi
+
+  local remote_source_dir="$CODEX_VM_BASE_DIR/source"
+  local remote_artifact_dir="$CODEX_VM_ARTIFACT_DIR"
+
+  cat > "$tmp_env" <<EOF_ENV
+export CODEX_VM_BASE_DIR='$(printf '%s' "$CODEX_VM_BASE_DIR" | shell_escape_single)'
+export CODEX_VM_ARTIFACT_DIR='$(printf '%s' "$remote_artifact_dir" | shell_escape_single)'
+export CODEX_VM_SOURCE_DIR='$(printf '%s' "$remote_source_dir" | shell_escape_single)'
+export CODEX_VM_HOST_KEY='$(printf '%s' "$CODEX_VM_HOST_KEY" | shell_escape_single)'
+export CODEX_VM_GUEST_KEY='$(printf '%s' "${CODEX_VM_GUEST_KEY:-$CODEX_VM_HOST_KEY}" | shell_escape_single)'
+export CODEX_VM_LIFECYCLE_MODE='$(printf '%s' "$CODEX_VM_LIFECYCLE_MODE" | shell_escape_single)'
+export CODEX_VM_CODEX_DMG_URL='$(printf '%s' "$CODEX_VM_CODEX_DMG_URL" | shell_escape_single)'
+export CODEX_VM_CODEX_GIT_REF='$(printf '%s' "$CODEX_VM_CODEX_GIT_REF" | shell_escape_single)'
+export CODEX_VM_ENABLE_LINUX_UI_POLISH='$(printf '%s' "$CODEX_VM_ENABLE_LINUX_UI_POLISH" | shell_escape_single)'
+export CODEX_VM_LINUX_ISO_URL='$(printf '%s' "$CODEX_VM_LINUX_ISO_URL" | shell_escape_single)'
+export CODEX_VM_WINDOWS_ISO_PATH='$(printf '%s' "$CODEX_VM_WINDOWS_ISO_PATH" | shell_escape_single)'
+export CODEX_VM_LINUX_VM_NAME='$(printf '%s' "$CODEX_VM_LINUX_VM_NAME" | shell_escape_single)'
+export CODEX_VM_LINUX_VM_OSTYPE='$(printf '%s' "$CODEX_VM_LINUX_VM_OSTYPE" | shell_escape_single)'
+export CODEX_VM_LINUX_VM_CPUS='$(printf '%s' "$CODEX_VM_LINUX_VM_CPUS" | shell_escape_single)'
+export CODEX_VM_LINUX_VM_MEMORY_MB='$(printf '%s' "$CODEX_VM_LINUX_VM_MEMORY_MB" | shell_escape_single)'
+export CODEX_VM_LINUX_VM_DISK_GB='$(printf '%s' "$CODEX_VM_LINUX_VM_DISK_GB" | shell_escape_single)'
+export CODEX_VM_LINUX_SSH_PORT='$(printf '%s' "$CODEX_VM_LINUX_SSH_PORT" | shell_escape_single)'
+export CODEX_VM_LINUX_GUEST_USER='$(printf '%s' "$CODEX_VM_LINUX_GUEST_USER" | shell_escape_single)'
+export CODEX_VM_LINUX_GUEST_PASSWORD='$(printf '%s' "$CODEX_VM_LINUX_GUEST_PASSWORD" | shell_escape_single)'
+export CODEX_VM_LINUX_WORKSPACE='$(printf '%s' "$CODEX_VM_LINUX_WORKSPACE" | shell_escape_single)'
+export CODEX_VM_LINUX_BASE_OVA='$(printf '%s' "$CODEX_VM_LINUX_BASE_OVA" | shell_escape_single)'
+export CODEX_VM_LINUX_BASE_ISO='$(printf '%s' "$CODEX_VM_LINUX_BASE_ISO" | shell_escape_single)'
+export CODEX_VM_WINDOWS_VM_NAME='$(printf '%s' "$CODEX_VM_WINDOWS_VM_NAME" | shell_escape_single)'
+export CODEX_VM_WINDOWS_VM_OSTYPE='$(printf '%s' "$CODEX_VM_WINDOWS_VM_OSTYPE" | shell_escape_single)'
+export CODEX_VM_WINDOWS_VM_CPUS='$(printf '%s' "$CODEX_VM_WINDOWS_VM_CPUS" | shell_escape_single)'
+export CODEX_VM_WINDOWS_VM_MEMORY_MB='$(printf '%s' "$CODEX_VM_WINDOWS_VM_MEMORY_MB" | shell_escape_single)'
+export CODEX_VM_WINDOWS_VM_DISK_GB='$(printf '%s' "$CODEX_VM_WINDOWS_VM_DISK_GB" | shell_escape_single)'
+export CODEX_VM_WINDOWS_SSH_PORT='$(printf '%s' "$CODEX_VM_WINDOWS_SSH_PORT" | shell_escape_single)'
+export CODEX_VM_WINDOWS_GUEST_USER='$(printf '%s' "$CODEX_VM_WINDOWS_GUEST_USER" | shell_escape_single)'
+export CODEX_VM_WINDOWS_GUEST_PASSWORD='$(printf '%s' "$CODEX_VM_WINDOWS_GUEST_PASSWORD" | shell_escape_single)'
+export CODEX_VM_WINDOWS_WORKSPACE='$(printf '%s' "$CODEX_VM_WINDOWS_WORKSPACE" | shell_escape_single)'
+export CODEX_VM_WINDOWS_BASE_OVA='$(printf '%s' "$CODEX_VM_WINDOWS_BASE_OVA" | shell_escape_single)'
+export CODEX_VM_WINDOWS_BASE_ISO='$(printf '%s' "$CODEX_VM_WINDOWS_BASE_ISO" | shell_escape_single)'
+export CODEX_VM_USE_DEFAULT_UBUNTU_TEMPLATE='$(printf '%s' "${CODEX_VM_USE_DEFAULT_UBUNTU_TEMPLATE:-0}" | shell_escape_single)'
+EOF_ENV
+
+  ssh_host "mkdir -p ${CODEX_VM_BASE_DIR} ${remote_artifact_dir}"
+  scp -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -P "$CODEX_VM_HOST_SSH_PORT" "$tmp_env" "$remote_host:$remote_tmp_env"
+  scp -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -P "$CODEX_VM_HOST_SSH_PORT" "$SCRIPT_DIR/remote/build-agent.sh" "$remote_host:$remote_tmp_script"
+
+  rm -f "$tmp_env"
+
+  local sync_source="$remote_source_dir"
+  ssh_host "mkdir -p ${sync_source}"
+  rsync -az -e "ssh -i '$CODEX_VM_HOST_KEY' -p $CODEX_VM_HOST_SSH_PORT -o BatchMode=yes -o StrictHostKeyChecking=accept-new" --delete \
+    --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
+    "$REPO_ROOT/" "$remote_host:$sync_source/"
+
+  log "Invoking remote build-agent: action=$action"
+  ssh_host "source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}"
+
+  local run_root="$local_output_dir/$run_id"
+  mkdir -p "$run_root"
+  if ssh_host "[ -d ${remote_artifact_dir}/${run_id} ]"; then
+    scp -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -P "$CODEX_VM_HOST_SSH_PORT" -r "$remote_host:$remote_artifact_dir/$run_id/" "$run_root/"
+    if [ -d "$run_root/$run_id" ]; then
+      shopt -s dotglob
+      mv "$run_root/$run_id"/* "$run_root/" 2>/dev/null || true
+      rmdir "$run_root/$run_id" 2>/dev/null || true
+      shopt -u dotglob
+    fi
+  fi
+
+  local iso_hash="unknown"
+  if [ -n "$CODEX_VM_WINDOWS_ISO_PATH" ]; then
+    iso_hash="$(ssh_host "if [ -f ${CODEX_VM_WINDOWS_ISO_PATH} ]; then sha256sum ${CODEX_VM_WINDOWS_ISO_PATH} | awk '{print \$1}'; else echo unknown; fi")"
+  fi
+
+  local git_sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
+  cat > "$run_root/run-manifest.json" <<EOF_MANIFEST
+{
+  "run_id": "$run_id",
+  "platform": "remote-vm",
+  "git_ref": "$CODEX_VM_CODEX_GIT_REF",
+  "git_sha": "$git_sha",
+  "code_url": "$CODEX_VM_CODEX_DMG_URL",
+  "windows_iso_path": "$CODEX_VM_WINDOWS_ISO_PATH",
+  "windows_iso_sha256": "$iso_hash",
+  "timestamp_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "linux_workspace": "$CODEX_VM_LINUX_WORKSPACE",
+  "windows_workspace": "$CODEX_VM_WINDOWS_WORKSPACE"
+}
+EOF_MANIFEST
+
+  log "Run manifest: $run_root/run-manifest.json"
+}
+
+# Config load
+shopt -s extglob
+: > /dev/null
+
+  load_setting host CODEX_VM_HOST
+  load_setting user CODEX_VM_USER
+  load_setting ssh_key CODEX_VM_HOST_KEY
+  load_setting guest_key CODEX_VM_GUEST_KEY
+  load_setting ssh_port CODEX_VM_HOST_SSH_PORT 22
+  load_setting base_dir CODEX_VM_BASE_DIR "~/codex-vm"
+  load_setting artifact_dir CODEX_VM_ARTIFACT_DIR "~/codex-vm/artifacts"
+load_setting local_output_dir CODEX_VM_LOCAL_OUTPUT_DIR "infra/vm/artifacts"
+load_setting lifecycle_mode CODEX_VM_LIFECYCLE_MODE reuse
+load_setting codex_dmg_url CODEX_VM_CODEX_DMG_URL https://persistent.oaistatic.com/codex-app-prod/Codex.dmg
+load_setting codex_git_ref CODEX_VM_CODEX_GIT_REF rust-v0.102.0-alpha.5
+load_setting enable_linux_ui_polish CODEX_VM_ENABLE_LINUX_UI_POLISH 1
+load_setting linux_iso_url CODEX_VM_LINUX_ISO_URL https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso
+load_setting windows_iso_path CODEX_VM_WINDOWS_ISO_PATH
+load_setting linux_vm_name CODEX_VM_LINUX_VM_NAME codex-linux-builder
+load_setting linux_ostype CODEX_VM_LINUX_VM_OSTYPE Ubuntu_64
+load_setting linux_disk_gb CODEX_VM_LINUX_VM_DISK_GB 80
+load_setting linux_cpus CODEX_VM_LINUX_VM_CPUS 4
+load_setting linux_memory_mb CODEX_VM_LINUX_VM_MEMORY_MB 8192
+load_setting linux_base_ova CODEX_VM_LINUX_BASE_OVA
+load_setting linux_base_iso CODEX_VM_LINUX_BASE_ISO
+load_setting linux_ssh_port CODEX_VM_LINUX_SSH_PORT 2222
+load_setting linux_guest_user CODEX_VM_LINUX_GUEST_USER ramarivera
+load_setting linux_guest_password CODEX_VM_LINUX_GUEST_PASSWORD ramarivera
+load_setting linux_workspace CODEX_VM_LINUX_WORKSPACE /home/ubuntu/codex-linux
+load_setting windows_vm_name CODEX_VM_WINDOWS_VM_NAME codex-windows-builder
+load_setting windows_ostype CODEX_VM_WINDOWS_VM_OSTYPE Windows2019_64
+load_setting windows_disk_gb CODEX_VM_WINDOWS_VM_DISK_GB 120
+load_setting windows_cpus CODEX_VM_WINDOWS_VM_CPUS 6
+load_setting windows_memory_mb CODEX_VM_WINDOWS_VM_MEMORY_MB 12288
+load_setting windows_base_ova CODEX_VM_WINDOWS_BASE_OVA
+load_setting windows_base_iso CODEX_VM_WINDOWS_BASE_ISO
+load_setting windows_ssh_port CODEX_VM_WINDOWS_SSH_PORT 2232
+load_setting windows_guest_user CODEX_VM_WINDOWS_GUEST_USER ramarivera
+load_setting windows_guest_password CODEX_VM_WINDOWS_GUEST_PASSWORD ramarivera
+load_setting windows_workspace CODEX_VM_WINDOWS_WORKSPACE /c/codex-windows/codex-linux
+load_setting use_default_ubuntu_template CODEX_VM_USE_DEFAULT_UBUNTU_TEMPLATE 0
+
+  if [ -z "${CODEX_VM_HOST:-}" ] || [ -z "${CODEX_VM_USER:-}" ] || [ -z "${CODEX_VM_HOST_KEY:-}" ]; then
+  usage_missing_config
+  fi
+
+# Normalize paths
+CODEX_VM_HOST_KEY="$(expand_home "$CODEX_VM_HOST_KEY")"
+CODEX_VM_LOCAL_OUTPUT_DIR="$(expand_home "$CODEX_VM_LOCAL_OUTPUT_DIR")"
+
+if [ -f "$CONFIG_PATH" ]; then
+  log "Loaded config: $CONFIG_PATH"
+else
+  log "Config not found at $CONFIG_PATH; relying on environment variables only"
+fi
+
+ACTION="${1:-}"
+if [ -z "$ACTION" ]; then
+  fatal "usage: codex-vm <check|linux|win|windows|both|build|release> [run_id]"
+fi
+
+RUN_ID="${2:-$(date -u +%Y%m%dT%H%M%SZ)}"
+
+case "$ACTION" in
+  check)
+    run_remote_action check "$RUN_ID"
+    ;;
+  linux|win|windows|both)
+    run_remote_action "$ACTION" "$RUN_ID"
+    ;;
+  build)
+    run_remote_action both "$RUN_ID"
+    ;;
+  release)
+    run_remote_action both "$RUN_ID"
+    log "Remote build artifacts are under $CODEX_VM_LOCAL_OUTPUT_DIR/$RUN_ID"
+    log "Release flow remains the existing codex:release task in this repo after copying Linux AppImage as needed."
+    ;;
+  *)
+    fatal "unknown action '$ACTION'"
+    ;;
+esac

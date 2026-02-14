@@ -46,3 +46,11 @@
 - What was learned: Additive path hardening must include creating all target folders explicitly.
 - Better prompt suggestion for Ramiro: Ask for explicit Windows runtime path expectations before broadening CLI path copies, so we avoid adding speculative folders.
 - Current decision/next step: Commit this fix and trigger another tagged run.
+
+## 2026-02-14
+- Task title: Fix VM orchestration scripts for reproducible Linux/Windows builds
+- Category: Procedural
+- What happened: Audited newly added `infra/vm` VM orchestrator and fixed three correctness issues: TOML config keys mismatched the loader script, Windows guest build script copied to `resources/bin` without ensuring the directory exists, and the remote VirtualBox unattended install hardcoded a local password instead of using the configured guest password.
+- What was learned: Thin “glue” scripts fail most often on small mismatches (config key naming, missing intermediate dirs, accidental hardcoding). Static checks (`bash -n`) plus a quick diff audit catches most of these early.
+- Better prompt suggestion for Ramiro: When you add an orchestration layer, ask me to validate it end-to-end as “config -> runner -> guest build -> artifact fetch”, and I’ll explicitly check for key mismatches and path creation.
+- Current decision/next step: Try `mise run codex:vm:check` with a real `~/.config/codex-vm/config.toml` and then run `mise run codex:vm:build` to validate artifacts round-trip.

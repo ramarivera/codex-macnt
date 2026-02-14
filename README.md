@@ -44,13 +44,23 @@ What the script does:
 - `mise run codex:ui:design` (Claude CLI generates `ui-design-overrides.candidate.json`)
 - `mise run codex:ui:pin` (promote candidate to pinned `ui-design-overrides.json`)
 - `mise run codex:ui:loop` (design candidate + print next steps)
+- `mise run codex:vm:check` (remote VM preflight)
+- `mise run codex:vm:linux:build` (remote Linux VM build)
+- `mise run codex:vm:win:build` (remote Windows VM build)
+- `mise run codex:vm:build` (remote Linux + Windows build)
+- `mise run codex:vm:release` (run remote VM builds, then follow local release steps)
 
 ## Output
 
-After success, you get exactly one distributable artifact here:
+After success, you get these artifacts locally from the Linux build path:
 
 - `./Codex.AppImage`
 - `./versions.json` (tracks `app` and `cli` versions)
+
+The GitHub release workflow also publishes:
+
+- `Codex-Setup-Windows-x64.exe` (NSIS installer)
+- `Codex-x86_64.AppImage` (portable Linux AppImage)
 
 ## Run
 
@@ -105,6 +115,13 @@ Run:
 mise run codex:release
 ```
 
+Remote build + release workflow:
+
+```nu
+mise run codex:vm:build
+mise run codex:vm:release
+```
+
 ## Claude design loop (terminal)
 
 To co-design Linux polish with Claude Code CLI from terminal:
@@ -141,4 +158,10 @@ CODEX_GIT_REF=main mise run codex:build
 
 This project was built end-to-end using the Codex app and Codex 5.3.
 
-This is an unofficial community project and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex.
+This is an unofficial community project.
+
+- Project source is a hobbyist community build and reverse-engineering effort.
+- Not affiliated with, endorsed by, sponsored by, or officially supported by OpenAI, ChatGPT, or Codex.
+- Windows installer and Linux packaging are community-maintained adaptations and may differ from official OpenAI releases.
+- Use at your own risk; verify checksums and behavior before production use.
+- If you report issues, use this repository and include platform/version details.

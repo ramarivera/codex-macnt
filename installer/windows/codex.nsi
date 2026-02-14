@@ -17,11 +17,10 @@
 
 ; --- Application metadata ---
 !define APP_NAME        "Codex"
-!define APP_PUBLISHER   "OpenAI"
+!define APP_PUBLISHER   "Community contributors"
 !define APP_EXE         "Codex.exe"
 !define CLI_EXE         "resources\app\resources\bin\codex.exe"
 !define UNINSTALL_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-
 ; Optional: Path to custom icon (extracted from DMG or provided at build time)
 ; If not defined, will use the executable's icon
 !ifndef APP_ICON
@@ -34,6 +33,10 @@ InstallDir "$LOCALAPPDATA\${APP_NAME}"
 InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
+BrandingText "${APP_NAME} Unofficial Installer"
+
+!define MUI_TEXT_WELCOME_INFO_TITLE "${APP_NAME} (Community Build)"
+!define MUI_TEXT_WELCOME_INFO_TEXT "${APP_NAME} for Windows${\r\n}${\r\n}This installer is provided as a community-maintained distribution.${\r\n}It is not official software from OpenAI and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex."
 
 ; --- MUI pages ---
 !insertmacro MUI_PAGE_WELCOME
