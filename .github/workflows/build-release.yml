@@ -202,7 +202,13 @@ jobs:
           mv electron-dist/electron.exe electron-dist/Codex.exe
           
           # Copy Windows CLI binary
-          mkdir -p electron-dist/resources/app/resources electron-dist/resources/app/resources/bin
+          mkdir -p \
+            electron-dist/resources/app \
+            electron-dist/resources/app/resources \
+            electron-dist/resources/app/resources/bin \
+            electron-dist/resources/app/bin \
+            electron-dist/resources \
+            electron-dist/resources/bin
           cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" electron-dist/resources/app/resources/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/resources/bin/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/codex.exe

@@ -38,3 +38,11 @@
 - What was learned: The error can persist if the app resolves CLI at a different resource root than the packaging assumption, so duplicating the binary to all expected locations is safer for now.
 - Better prompt suggestion for Ramiro: If you get a runtime path error, include the exact error string and where it says it looked for the CLI; that lets us patch the precise path expectation.
 - Current decision/next step: Trigger another tagged run and verify installer behavior before concluding.
+
+## 2026-02-14
+- Task title: Fix mkdir path regression in windows packaging patch
+- Category: Procedural
+- What happened: The previous patch failed because `resources/app/bin` was created in cp list but not guaranteed to exist. Build logs showed `cp: cannot create regular file .../resources/app/bin/codex.exe`.
+- What was learned: Additive path hardening must include creating all target folders explicitly.
+- Better prompt suggestion for Ramiro: Ask for explicit Windows runtime path expectations before broadening CLI path copies, so we avoid adding speculative folders.
+- Current decision/next step: Commit this fix and trigger another tagged run.
