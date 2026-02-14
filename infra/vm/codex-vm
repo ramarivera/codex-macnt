@@ -224,18 +224,26 @@ EOF_ENV
     "$REPO_ROOT/" "$remote_host:$sync_source/"
 
   log "Invoking remote build-agent: action=$action"
-  ssh_host "source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}"
+  local remote_rc=0
+  if ! ssh_host "source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}"; then
+    remote_rc=$?
+    log "Remote build-agent exited with code $remote_rc; attempting to fetch debug artifacts before failing."
+  fi
 
   local run_root="$local_output_dir/$run_id"
   mkdir -p "$run_root"
   if ssh_host "[ -d ${remote_artifact_dir}/${run_id} ]"; then
-    scp -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -P "$CODEX_VM_HOST_SSH_PORT" -r "$remote_host:$remote_artifact_dir/$run_id/" "$run_root/"
+    if ! scp -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -P "$CODEX_VM_HOST_SSH_PORT" -r "$remote_host:$remote_artifact_dir/$run_id/" "$run_root/"; then
+      log "Failed to copy remote artifacts from ${remote_artifact_dir}/${run_id}; continuing"
+    fi
     if [ -d "$run_root/$run_id" ]; then
       shopt -s dotglob
       mv "$run_root/$run_id"/* "$run_root/" 2>/dev/null || true
       rmdir "$run_root/$run_id" 2>/dev/null || true
       shopt -u dotglob
     fi
+  elif ((remote_rc != 0)); then
+    log "Remote artifact directory not found for run-id ${run_id}; skipping artifact sync."
   fi
 
   local iso_hash="unknown"
@@ -264,6 +272,10 @@ EOF_MANIFEST
   fi
 
   log "Run manifest: $run_root/run-manifest.json"
+
+  if ((remote_rc != 0)); then
+    return "$remote_rc"
+  fi
 }
 
 # Config load
