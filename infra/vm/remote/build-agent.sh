@@ -510,6 +510,26 @@ vm_create_from_iso() {
     if [[ "$CODEX_VM_USE_DEFAULT_UBUNTU_TEMPLATE" != "1" ]]; then
       script_template="$CODEX_VM_BASE_MEDIA_DIR/ubuntu-autoinstall-user-data.template"
       cp /usr/share/virtualbox/UnattendedTemplates/ubuntu_autoinstall_user_data "$script_template"
+
+      # Ensure OpenSSH server is installed/enabled. VirtualBox's stock template
+      # sets SSH authorized_keys but does not request ssh-server installation.
+      # Insert an explicit autoinstall ssh stanza once, right after shutdown.
+      if ! grep -qE '^[[:space:]]+ssh:[[:space:]]*$' "$script_template"; then
+        local template_tmp="${script_template}.tmp.$$"
+        awk '
+          {
+            print
+            if ($0 ~ /^[[:space:]]*shutdown:[[:space:]]*reboot[[:space:]]*$/) {
+              print ""
+              print "  ssh:"
+              print "    install-server: true"
+              print "    allow-pw: true"
+            }
+          }
+        ' "$script_template" > "$template_tmp"
+        mv "$template_tmp" "$script_template"
+      fi
+
       if [[ -f "${CODEX_VM_GUEST_KEY}.pub" ]]; then
         public_key="$(cat "${CODEX_VM_GUEST_KEY}.pub")"
         local template_tmp="${script_template}.tmp.$$"
