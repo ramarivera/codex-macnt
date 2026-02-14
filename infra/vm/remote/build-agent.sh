@@ -530,6 +530,24 @@ vm_create_from_iso() {
         mv "$template_tmp" "$script_template"
       fi
 
+      # Some environments still end up without an SSH daemon. Force installation/enabling
+      # via curtin late-commands so the NAT forward can be used immediately after install.
+      if ! grep -q "codex-vm-ensure-ssh" "$script_template"; then
+        local template_tmp="${script_template}.tmp.$$"
+        awk '
+          {
+            print
+            if ($0 ~ /^[[:space:]]*late-commands:[[:space:]]*$/) {
+              print "    - echo codex-vm-ensure-ssh"
+              print "    - curtin in-target --target=/target -- apt-get update"
+              print "    - curtin in-target --target=/target -- apt-get install -y openssh-server"
+              print "    - curtin in-target --target=/target -- systemctl enable ssh --now || true"
+            }
+          }
+        ' "$script_template" > "$template_tmp"
+        mv "$template_tmp" "$script_template"
+      fi
+
       if [[ -f "${CODEX_VM_GUEST_KEY}.pub" ]]; then
         public_key="$(cat "${CODEX_VM_GUEST_KEY}.pub")"
         local template_tmp="${script_template}.tmp.$$"
