@@ -202,6 +202,7 @@ jobs:
           mv electron-dist/electron.exe electron-dist/Codex.exe
           
           # Copy Windows CLI binary
+          mkdir -p electron-dist/resources/app/resources electron-dist/resources/app/resources/bin
           cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" electron-dist/resources/app/resources/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/resources/bin/codex.exe
           
@@ -284,6 +285,7 @@ jobs:
           cp -a app_unpacked/. AppDir/usr/share/codex/
           
           # Copy Linux CLI binary
+          mkdir -p AppDir/usr/share/codex/resources AppDir/usr/share/codex/resources/bin
           cp "$GITHUB_WORKSPACE/dist/linux-x64/codex" AppDir/usr/share/codex/resources/codex
           cp AppDir/usr/share/codex/resources/codex AppDir/usr/share/codex/resources/bin/codex
           chmod +x AppDir/usr/share/codex/resources/codex
