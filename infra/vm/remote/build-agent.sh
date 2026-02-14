@@ -342,6 +342,34 @@ vm_wait_for_ssh_server() {
   return 1
 }
 
+vm_wait_for_guest_login() {
+  local user="$1"
+  local port="$2"
+  local timeout="${3:-900}"
+  local i=0
+
+  while ((i < timeout)); do
+    if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
+      if ssh -i "$CODEX_VM_GUEST_KEY" \
+        -o PasswordAuthentication=no -o PubkeyAuthentication=yes \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o GlobalKnownHostsFile=/dev/null \
+        -o ConnectTimeout=10 \
+        -o BatchMode=yes \
+        -p "$port" \
+        "$user@127.0.0.1" "echo codex-vm-ready" >/dev/null 2>&1; then
+        return 0
+      fi
+    fi
+
+    sleep 2
+    i=$((i + 2))
+  done
+
+  return 1
+}
+
 vm_refresh() {
   local vm="$1"
   if [[ "$CODEX_VM_LIFECYCLE_MODE" == "recreate" ]] && vm_exists "$vm"; then
@@ -393,8 +421,6 @@ vm_start() {
     if ! vm_set_nat_ssh "$vm" "$port"; then
       log "VM $vm is already running; keeping existing SSH forwarding to avoid lock conflict"
     fi
-    vm_wait_for_port "$port" || fatal "guest TCP port did not become ready on port $port"
-    vm_wait_for_ssh_server "$port" "$user" || fatal "guest SSH server did not become ready on port $port"
     return 0
   fi
 
@@ -446,8 +472,6 @@ vm_start() {
     VBoxManage unregistervm "$vm" --delete >/dev/null 2>&1 || true
     return 1
   fi
-  vm_wait_for_port "$port" || fatal "guest TCP port did not become ready on port $port"
-  vm_wait_for_ssh_server "$port" "$user" || fatal "guest SSH server did not become ready on port $port"
 }
 
 vm_import_ova() {
@@ -559,7 +583,7 @@ vm_prepare() {
   if vm_exists "$vm" && [[ "$CODEX_VM_LIFECYCLE_MODE" != "recreate" ]]; then
     log "Reusing existing VM: $vm"
     if vm_start "$vm" "$port" "$user"; then
-      return
+      :
     fi
     if vm_exists "$vm"; then
       log "Existing VM $vm did not start cleanly; removing and recreating from base image"
@@ -576,6 +600,21 @@ vm_prepare() {
   fi
 
   vm_start "$vm" "$port" "$user"
+
+  local tcp_timeout="${CODEX_VM_TCP_READY_TIMEOUT:-240}"
+  local ssh_timeout="${CODEX_VM_SSH_READY_TIMEOUT:-240}"
+  local login_timeout="${CODEX_VM_GUEST_LOGIN_TIMEOUT:-900}"
+
+  if [[ -n "$base_iso" && -z "$base_ova" ]]; then
+    # ISO unattended installs can take a while before first successful login.
+    login_timeout="${CODEX_VM_GUEST_LOGIN_TIMEOUT:-3600}"
+    ssh_timeout="${CODEX_VM_SSH_READY_TIMEOUT:-1800}"
+    tcp_timeout="${CODEX_VM_TCP_READY_TIMEOUT:-1800}"
+  fi
+
+  vm_wait_for_port "$port" || fatal "guest TCP port did not become ready on port $port"
+  vm_wait_for_ssh_server "$port" "$user" || fatal "guest SSH server did not become ready on port $port"
+  vm_wait_for_guest_login "$user" "$port" "$login_timeout" || fatal "guest SSH login did not become ready on port $port (timeout ${login_timeout}s)"
 }
 
 copy_to_guest_once() {
@@ -597,7 +636,7 @@ copy_to_guest_once() {
     while ((attempt <= 8)); do
       if rsync -az --delete \
         --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
-        -e "ssh -i '$CODEX_VM_GUEST_KEY' -p '$port' -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" \
+        -e "ssh -i '$CODEX_VM_GUEST_KEY' -p '$port' -o BatchMode=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" \
         "$src/" "${user}@127.0.0.1:$dst/"; then
         return 0
       fi
