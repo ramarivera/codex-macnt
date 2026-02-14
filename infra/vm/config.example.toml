@@ -15,6 +15,17 @@ guest_key = "~/.ssh/id_ed25519"
 # Reuse existing VMs by default; set to "recreate" for clean bootstraps.
 lifecycle_mode = "reuse"
 
+# Auth policy for Linux guest SSH.
+# If set, overrides only the bootstrap user candidate list used when probing.
+# Comma-separated list (for example "builder,ubuntu,root"). Empty falls back to:
+# "<linux_guest_user>,ubuntu,root".
+guest_auth_users = ""
+
+# Retry behavior for Linux guest auth failures.
+# Set to 1 (default) for one automatic recreate retry on auth failure.
+# Set to 0 to fail fast if all candidates fail.
+retry_recreate_on_auth_failure = "1"
+
 # Build inputs
 codex_dmg_url = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 codex_git_ref = "rust-v0.102.0-alpha.5"

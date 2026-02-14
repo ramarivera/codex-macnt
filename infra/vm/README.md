@@ -25,7 +25,6 @@ mkdir -p ~/.config/codex-vm
 cp infra/vm/config.example.toml ~/.config/codex-vm/config.toml
 ```
 
-2. Configure SSH host for `arch-cachy`, keys, VM names, workspace paths, and OVA/ISO paths.
 2. Configure SSH host, keys, VM names, workspace paths, and OVA/ISO paths.
 
 3. Run a preflight:
@@ -53,6 +52,34 @@ Artifacts are written under:
 - `infra/vm/artifacts/<run-id>/windows/Codex-Setup-Windows-x64.exe`
 - `infra/vm/artifacts/<run-id>/run-manifest.json`
 
+## Linux auth and retry contract
+
+Linux guest provisioning now probes SSH users in a deterministic order:
+
+- Primary configured user (`linux_guest_user`)
+- Optional `guest_auth_users` list (comma-separated, e.g. `builder,ubuntu,root`)
+- `ubuntu`
+- `root`
+
+The first successful user is selected and then used for:
+
+- workspace derivation (`/home/<user>/codex-linux`)
+- source sync
+- build invocation
+- artifact pulls
+
+If all candidates fail on auth, the run fails once, emits candidate-level error context, then (if enabled) recreates the VM exactly once and retries:
+
+- `retry_recreate_on_auth_failure = "1"` (default) enables one controlled recreate retry
+- `retry_recreate_on_auth_failure = "0"` fails immediately
+
+On Linux auth/build failures, debug artifacts are collected under:
+
+- `infra/vm/artifacts/<run-id>/debug/linux/bootstrap.log` (guest bootstrap attempt output)
+- `infra/vm/artifacts/<run-id>/debug/linux/auth-attempts.log`
+- `infra/vm/artifacts/<run-id>/debug/linux/failure-reason.txt`
+- `infra/vm/artifacts/<run-id>/debug/linux/<VirtualBox VM log files>`
+
 ## Config values
 
 | Setting | Purpose |
@@ -65,6 +92,8 @@ Artifacts are written under:
 | `base_dir` | Base folder for temporary source/artifacts on host |
 | `artifact_dir` | Root artifact folder on host |
 | `lifecycle_mode` | `reuse` (default) or `recreate` |
+| `guest_auth_users` | Optional comma-separated list override for Linux SSH probe users |
+| `retry_recreate_on_auth_failure` | `1` for one Linux-auth failure recreate retry, `0` to fail fast |
 | `linux_iso_url` | Ubuntu ISO URL used when `linux_base_iso` is unset and no local Ubuntu ISO is found |
 | `linux_*`, `windows_*` | VM identity/capability settings |
 | `local_output_dir` | Local repo path for pulled artifacts |

@@ -147,7 +147,7 @@ Set-Location $installerWorkdir
 # Rebuild native modules for Windows/ Electron ABI
 $packagePath = Join-Path $installerWorkdir 'app_unpacked/package.json'
 $appNodeDeps = Get-Content $packagePath -Raw | ConvertFrom-Json
-$targetElectron = ($appNodeDeps.devDependencies.electron -replace '^\^', '')
+$targetElectron = ($appNodeDeps.devDependencies.electron -replace '^\\^', '')
 
 if ($targetElectron) {
     Write-Step "Rebuilding native modules for electron $targetElectron"
@@ -248,3 +248,4 @@ if (Test-Path (Join-Path $OutputDir 'Codex-Setup-Windows-x64.exe')) {
 }
 
 throw "Windows build did not produce installer in $OutputDir"
+

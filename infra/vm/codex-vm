@@ -193,6 +193,8 @@ export CODEX_VM_LINUX_SSH_PORT='$(printf '%s' "$CODEX_VM_LINUX_SSH_PORT" | shell
 export CODEX_VM_LINUX_GUEST_USER='$(printf '%s' "$CODEX_VM_LINUX_GUEST_USER" | shell_escape_single)'
 export CODEX_VM_LINUX_GUEST_PASSWORD='$(printf '%s' "$CODEX_VM_LINUX_GUEST_PASSWORD" | shell_escape_single)'
 export CODEX_VM_LINUX_WORKSPACE='$(printf '%s' "$CODEX_VM_LINUX_WORKSPACE" | shell_escape_single)'
+export CODEX_VM_GUEST_AUTH_USERS='$(printf '%s' "$CODEX_VM_GUEST_AUTH_USERS" | shell_escape_single)'
+export CODEX_VM_RETRY_RECREATE_ON_AUTH_FAILURE='$(printf '%s' "$CODEX_VM_RETRY_RECREATE_ON_AUTH_FAILURE" | shell_escape_single)'
 export CODEX_VM_LINUX_BASE_OVA='$(printf '%s' "$CODEX_VM_LINUX_BASE_OVA" | shell_escape_single)'
 export CODEX_VM_LINUX_BASE_ISO='$(printf '%s' "$CODEX_VM_LINUX_BASE_ISO" | shell_escape_single)'
 export CODEX_VM_WINDOWS_VM_NAME='$(printf '%s' "$CODEX_VM_WINDOWS_VM_NAME" | shell_escape_single)'
@@ -242,7 +244,10 @@ EOF_ENV
   fi
 
   local git_sha="$(git -C "$REPO_ROOT" rev-parse --short HEAD)"
-  cat > "$run_root/run-manifest.json" <<EOF_MANIFEST
+  if [ -f "$run_root/run-manifest.json" ]; then
+    log "Run manifest preserved from remote: $run_root/run-manifest.json"
+  else
+    cat > "$run_root/run-manifest.json" <<EOF_MANIFEST
 {
   "run_id": "$run_id",
   "platform": "remote-vm",
@@ -256,6 +261,7 @@ EOF_ENV
   "windows_workspace": "$CODEX_VM_WINDOWS_WORKSPACE"
 }
 EOF_MANIFEST
+  fi
 
   log "Run manifest: $run_root/run-manifest.json"
 }
@@ -288,7 +294,7 @@ load_setting linux_base_iso CODEX_VM_LINUX_BASE_ISO
 load_setting linux_ssh_port CODEX_VM_LINUX_SSH_PORT 2222
 load_setting linux_guest_user CODEX_VM_LINUX_GUEST_USER ramarivera
 load_setting linux_guest_password CODEX_VM_LINUX_GUEST_PASSWORD ramarivera
-load_setting linux_workspace CODEX_VM_LINUX_WORKSPACE /home/ubuntu/codex-linux
+load_setting linux_workspace CODEX_VM_LINUX_WORKSPACE "/home/${CODEX_VM_LINUX_GUEST_USER}/codex-linux"
 load_setting windows_vm_name CODEX_VM_WINDOWS_VM_NAME codex-windows-builder
 load_setting windows_ostype CODEX_VM_WINDOWS_VM_OSTYPE Windows2019_64
 load_setting windows_disk_gb CODEX_VM_WINDOWS_VM_DISK_GB 120
@@ -300,6 +306,8 @@ load_setting windows_ssh_port CODEX_VM_WINDOWS_SSH_PORT 2232
 load_setting windows_guest_user CODEX_VM_WINDOWS_GUEST_USER ramarivera
 load_setting windows_guest_password CODEX_VM_WINDOWS_GUEST_PASSWORD ramarivera
 load_setting windows_workspace CODEX_VM_WINDOWS_WORKSPACE /c/codex-windows/codex-linux
+load_setting guest_auth_users CODEX_VM_GUEST_AUTH_USERS ""
+load_setting retry_recreate_on_auth_failure CODEX_VM_RETRY_RECREATE_ON_AUTH_FAILURE 1
 load_setting use_default_ubuntu_template CODEX_VM_USE_DEFAULT_UBUNTU_TEMPLATE 0
 
   if [ -z "${CODEX_VM_HOST:-}" ] || [ -z "${CODEX_VM_USER:-}" ] || [ -z "${CODEX_VM_HOST_KEY:-}" ]; then
