@@ -620,8 +620,9 @@ vm_create_from_iso() {
               print "    - curtin in-target --target=/target -- apt-get update"
               print "    - curtin in-target --target=/target -- apt-get install -y openssh-server"
               print "    - curtin in-target --target=/target -- /bin/sh -lc \"mkdir -p /etc/ssh/sshd_config.d && printf %s\\\\n PasswordAuthentication\\\\ yes ChallengeResponseAuthentication\\\\ yes PubkeyAuthentication\\\\ yes > /etc/ssh/sshd_config.d/99-codex-vm-auth.conf\""
-              print "    - curtin in-target --target=/target -- systemctl enable ssh --now || true"
-              print "    - curtin in-target --target=/target -- systemctl restart ssh || true"
+              # Ubuntu 24.04 defaults to socket-activated SSH; enable the socket so port 22 listens immediately.
+              print "    - curtin in-target --target=/target -- /bin/sh -lc \"systemctl enable --now ssh.socket 2>/dev/null || systemctl enable --now ssh 2>/dev/null || true\""
+              print "    - curtin in-target --target=/target -- /bin/sh -lc \"systemctl restart ssh.socket 2>/dev/null || systemctl restart ssh 2>/dev/null || true\""
             }
           }
         ' "$script_template" > "$template_tmp"
@@ -663,8 +664,9 @@ vm_create_from_iso() {
   # Keep fallback users aligned with the configured guest password so SSH recovery works.
   post_install_command+="printf '%s\n%s\n%s\n' '${user}:${password}' 'ubuntu:${password}' 'root:${password}' | chpasswd && "
   post_install_command+="systemctl daemon-reload || true; "
-  post_install_command+="(systemctl restart ssh || service ssh restart || service sshd restart) || true; "
-  post_install_command+="systemctl enable ssh --now || true"
+  # Ubuntu 24.04 uses socket-activated ssh by default; prefer ssh.socket so port 22 listens.
+  post_install_command+="(systemctl enable --now ssh.socket 2>/dev/null || systemctl enable --now ssh 2>/dev/null || true); "
+  post_install_command+="(systemctl restart ssh.socket 2>/dev/null || systemctl restart ssh 2>/dev/null || service ssh restart || service sshd restart) || true"
 
   VBoxManage createvm --name "$vm" --ostype "$ostype" --register >/dev/null
   # Use VMSVGA for modern Linux guests; VBoxVGA is legacy and has caused kernel crashes
