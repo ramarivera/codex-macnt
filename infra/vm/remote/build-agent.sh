@@ -336,6 +336,16 @@ vm_refresh() {
 vm_set_nat_ssh() {
   local vm="$1"
   local port="$2"
+
+  # When a VM is running or has an active session, `modifyvm` can fail with a lock error.
+  # `controlvm ... natpf1` works on a running VM without needing an exclusive write lock.
+  if vm_running "$vm"; then
+    VBoxManage controlvm "$vm" natpf1 delete "codex-ssh" >/dev/null 2>&1 || true
+    if VBoxManage controlvm "$vm" natpf1 "codex-ssh,tcp,,${port},,22" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
   VBoxManage modifyvm "$vm" --natpf1 delete "codex-ssh" >/dev/null 2>&1 || true
   VBoxManage modifyvm "$vm" --natpf1 "codex-ssh,tcp,,${port},,22" >/dev/null
 }
