@@ -38,14 +38,6 @@ cd "$WORKDIR"
 echo "Starting Linux Codex build in $WORKDIR"
 mise run codex:build
 
-if [[ -f "$WORKDIR/Codex.AppImage" ]]; then
-  cp "$WORKDIR/Codex.AppImage" "$OUTPUT_DIR/Codex.AppImage"
-fi
-
-if [[ -f "$WORKDIR/versions.json" ]]; then
-  cp "$WORKDIR/versions.json" "$OUTPUT_DIR/versions.json"
-fi
-
 MANIFEST="$OUTPUT_DIR/manifest.json"
 cat > "$MANIFEST" <<EOF_JSON
 {
@@ -58,6 +50,14 @@ cat > "$MANIFEST" <<EOF_JSON
   "artifact": "Codex.AppImage"
 }
 EOF_JSON
+
+if [[ -f "$WORKDIR/Codex.AppImage" ]]; then
+  cp "$WORKDIR/Codex.AppImage" "$OUTPUT_DIR/Codex.AppImage"
+fi
+
+if [[ -f "$WORKDIR/versions.json" ]]; then
+  cp "$WORKDIR/versions.json" "$OUTPUT_DIR/versions.json"
+fi
 
 if [[ -f "$OUTPUT_DIR/Codex.AppImage" && -f "$OUTPUT_DIR/versions.json" ]]; then
   echo "Linux guest build complete: $OUTPUT_DIR"
