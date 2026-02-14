@@ -347,6 +347,7 @@ vm_wait_for_guest_login() {
   local port="$2"
   local timeout="${3:-900}"
   local i=0
+  local last_log=0
 
   while ((i < timeout)); do
     if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
@@ -361,6 +362,11 @@ vm_wait_for_guest_login() {
         "$user@127.0.0.1" "echo codex-vm-ready" >/dev/null 2>&1; then
         return 0
       fi
+    fi
+
+    if (( (i - last_log) >= 30 )); then
+      log "Waiting for guest SSH login: ${user}@127.0.0.1:${port} (${i}s/${timeout}s)"
+      last_log="$i"
     fi
 
     sleep 2
@@ -575,6 +581,7 @@ vm_prepare() {
   local port="$8"
   local user="$9"
   local password="${10}"
+  local reused_vm=0
 
   if ! vm_refresh "$vm"; then
     fatal "Failed to reset VM in recreate mode for $vm"
@@ -583,23 +590,26 @@ vm_prepare() {
   if vm_exists "$vm" && [[ "$CODEX_VM_LIFECYCLE_MODE" != "recreate" ]]; then
     log "Reusing existing VM: $vm"
     if vm_start "$vm" "$port" "$user"; then
-      :
-    fi
-    if vm_exists "$vm"; then
-      log "Existing VM $vm did not start cleanly; removing and recreating from base image"
-      VBoxManage unregistervm "$vm" --delete >/dev/null 2>&1 || true
+      reused_vm=1
+    else
+      if vm_exists "$vm"; then
+        log "Existing VM $vm did not start cleanly; removing and recreating from base image"
+        VBoxManage unregistervm "$vm" --delete >/dev/null 2>&1 || true
+      fi
     fi
   fi
 
-  if [[ -n "$base_ova" ]]; then
-    vm_import_ova "$vm" "$base_ova" "$cpus" "$memory" "$ostype"
-  elif [[ -n "$base_iso" ]]; then
-    vm_create_from_iso "$vm" "$base_iso" "$cpus" "$memory" "$disk" "$ostype" "$user" "$password"
-  else
-    fatal "Missing Linux/Windows base OVA/ISO for $vm"
-  fi
+  if [[ "$reused_vm" -ne 1 ]]; then
+    if [[ -n "$base_ova" ]]; then
+      vm_import_ova "$vm" "$base_ova" "$cpus" "$memory" "$ostype"
+    elif [[ -n "$base_iso" ]]; then
+      vm_create_from_iso "$vm" "$base_iso" "$cpus" "$memory" "$disk" "$ostype" "$user" "$password"
+    else
+      fatal "Missing Linux/Windows base OVA/ISO for $vm"
+    fi
 
-  vm_start "$vm" "$port" "$user"
+    vm_start "$vm" "$port" "$user"
+  fi
 
   local tcp_timeout="${CODEX_VM_TCP_READY_TIMEOUT:-240}"
   local ssh_timeout="${CODEX_VM_SSH_READY_TIMEOUT:-240}"
