@@ -312,6 +312,36 @@ vm_wait_for_port() {
   return 1
 }
 
+vm_wait_for_ssh_server() {
+  local port="$1"
+  local user="${2:-root}"
+  local timeout=240
+  local i=0
+  local out=""
+
+  while ((i < timeout)); do
+    # We only care that an SSH server is answering; auth can fail.
+    out="$(ssh \
+      -o PreferredAuthentications=none \
+      -o PubkeyAuthentication=no \
+      -o PasswordAuthentication=no \
+      -o KbdInteractiveAuthentication=no \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o GlobalKnownHostsFile=/dev/null \
+      -o ConnectTimeout=5 \
+      -o BatchMode=yes \
+      -p "$port" \
+      "$user@127.0.0.1" exit 2>&1 || true)"
+    if [[ "$out" == *"Permission denied"* || "$out" == *"no more authentication methods"* ]]; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 vm_refresh() {
   local vm="$1"
   if [[ "$CODEX_VM_LIFECYCLE_MODE" == "recreate" ]] && vm_exists "$vm"; then
@@ -353,6 +383,7 @@ vm_set_nat_ssh() {
 vm_start() {
   local vm="$1"
   local port="$2"
+  local user="${3:-root}"
   local current_state
   local attempt=1
   local started=0
@@ -362,7 +393,8 @@ vm_start() {
     if ! vm_set_nat_ssh "$vm" "$port"; then
       log "VM $vm is already running; keeping existing SSH forwarding to avoid lock conflict"
     fi
-    vm_wait_for_port "$port" || fatal "guest SSH did not become ready on port $port"
+    vm_wait_for_port "$port" || fatal "guest TCP port did not become ready on port $port"
+    vm_wait_for_ssh_server "$port" "$user" || fatal "guest SSH server did not become ready on port $port"
     return 0
   fi
 
@@ -414,7 +446,8 @@ vm_start() {
     VBoxManage unregistervm "$vm" --delete >/dev/null 2>&1 || true
     return 1
   fi
-  vm_wait_for_port "$port" || fatal "guest SSH did not become ready on port $port"
+  vm_wait_for_port "$port" || fatal "guest TCP port did not become ready on port $port"
+  vm_wait_for_ssh_server "$port" "$user" || fatal "guest SSH server did not become ready on port $port"
 }
 
 vm_import_ova() {
@@ -525,7 +558,7 @@ vm_prepare() {
 
   if vm_exists "$vm" && [[ "$CODEX_VM_LIFECYCLE_MODE" != "recreate" ]]; then
     log "Reusing existing VM: $vm"
-    if vm_start "$vm" "$port"; then
+    if vm_start "$vm" "$port" "$user"; then
       return
     fi
     if vm_exists "$vm"; then
@@ -542,7 +575,7 @@ vm_prepare() {
     fatal "Missing Linux/Windows base OVA/ISO for $vm"
   fi
 
-  vm_start "$vm" "$port"
+  vm_start "$vm" "$port" "$user"
 }
 
 copy_to_guest_once() {
