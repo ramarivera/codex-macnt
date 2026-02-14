@@ -1134,8 +1134,12 @@ fi
 
 cd codex-rs
 echo "Building codex CLI for Linux x86_64..."
-cargo build --release --bin codex
-cargo build --release --bin codex-linux-sandbox || true
+# Build the full workspace (now that Docker image has libcap-dev)
+cargo build --release --bin codex --bin codex-linux-sandbox 2>&1 || {
+  echo "Full build failed, trying codex only..."
+  cargo build --release --bin codex
+}
+echo "codex binary built successfully"
 
 cp target/release/codex /output/codex
 if [ -f target/release/codex-linux-sandbox ]; then
@@ -1149,7 +1153,7 @@ cp -f "$docker_output_dir/codex" "$dist_dir/codex"
 if [ -f "$docker_output_dir/codex-linux-sandbox" ]; then
   cp -f "$docker_output_dir/codex-linux-sandbox" "$dist_dir/codex-linux-sandbox"
 fi
-file "$dist_dir/codex" | grep -qi "ELF\|Linux"
+file "$dist_dir/codex" | grep -qi "ELF.*Linux"
 
 echo ""
 echo "✅ Linux codex binary staged at: dist/linux-x64/codex"

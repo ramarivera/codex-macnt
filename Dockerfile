@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     npm \
     p7zip-full \
     dmg2img \
+    libcap-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create working directory
