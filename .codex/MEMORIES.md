@@ -30,3 +30,11 @@
 - What was learned: Upstream ASAR extraction/move flow doesn’t guarantee `app/resources` exists, so unconditional `mkdir -p` is required before `cp` for both OS jobs.
 - Better prompt suggestion for Ramiro: When asking for CI fixes, include the exact copy destination path and whether intermediate directories exist, so workflow preconditions can be hardened in one edit.
 - Current decision/next step: Commit this workflow patch, push, and run a follow-up tag-triggered CI.
+
+## 2026-02-14
+- Task title: Expand Windows CLI paths in release packaging
+- Category: Procedural
+- What happened: After your “same error on latest installer” report, I made a second hardening patch to copy the Windows CLI into all likely runtime paths (`resources/app/resources/...`, `resources/app/...`, and `resources/...`) and added explicit `test -f` checks for all six paths before NSIS build.
+- What was learned: The error can persist if the app resolves CLI at a different resource root than the packaging assumption, so duplicating the binary to all expected locations is safer for now.
+- Better prompt suggestion for Ramiro: If you get a runtime path error, include the exact error string and where it says it looked for the CLI; that lets us patch the precise path expectation.
+- Current decision/next step: Trigger another tagged run and verify installer behavior before concluding.

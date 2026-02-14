@@ -205,6 +205,23 @@ jobs:
           mkdir -p electron-dist/resources/app/resources electron-dist/resources/app/resources/bin
           cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" electron-dist/resources/app/resources/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/resources/bin/codex.exe
+          cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/codex.exe
+          cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/bin/codex.exe
+          cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/codex.exe
+          cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/bin/codex.exe
+          
+          for cli_path in \
+            electron-dist/resources/app/resources/codex.exe \
+            electron-dist/resources/app/resources/bin/codex.exe \
+            electron-dist/resources/app/codex.exe \
+            electron-dist/resources/app/bin/codex.exe \
+            electron-dist/resources/codex.exe \
+            electron-dist/resources/bin/codex.exe; do
+            if [ ! -f "$cli_path" ]; then
+              echo "❌ codex executable not found at $cli_path" >&2
+              exit 1
+            fi
+          done
           
           # Copy icon if available
           if [ -f "codex-icon/codex-icon.ico" ]; then
