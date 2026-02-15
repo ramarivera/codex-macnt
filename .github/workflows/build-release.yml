@@ -43,7 +43,7 @@ jobs:
         id: cli-tag
         run: |
           set -euo pipefail
-          cli_tag="${{ inputs.cli_tag }}"
+          cli_tag="${{ github.event.inputs.cli_tag }}"
           if [ -z "$cli_tag" ]; then
             cli_tag="$CODEX_CLI_TAG"
           fi
