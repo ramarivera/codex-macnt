@@ -16,11 +16,10 @@ on:
         required: false
         default: "rust-v0.102.0-alpha.7"
   push:
-    paths:
-      - ".github/workflows/build-release.yml"
-      - "versions.json"
-      - "installer/windows/codex.nsi"
-      - "infra/vm/guest/windows-build.ps1"
+    branches:
+      - master
+    tags:
+      - "v*"
 
 env:
   CODEX_DMG_URL: "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
@@ -474,9 +473,9 @@ jobs:
   # RELEASE: Create combined GitHub release with both artifacts
   # ═══════════════════════════════════════════════════════════════════════════
   release:
-    needs: [build-windows, build-linux]
+    needs: [extract, build-windows, build-linux]
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
     steps:
