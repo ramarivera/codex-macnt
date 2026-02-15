@@ -10,6 +10,11 @@ ARTIFACT_ROOT="${4:-${CODEX_VM_ARTIFACT_DIR:?missing CODEX_VM_ARTIFACT_DIR}}"
 : "${CODEX_VM_LIFECYCLE_MODE:?reuse}"
 : "${CODEX_VM_CODEX_DMG_URL:?missing CODEX_VM_CODEX_DMG_URL}"
 : "${CODEX_VM_CODEX_GIT_REF:?missing CODEX_VM_CODEX_GIT_REF}"
+: "${CODEX_VM_SKIP_RUST_BUILD:=1}"
+: "${CODEX_VM_SKIP_REBUILD_NATIVE:=1}"
+: "${CODEX_VM_PREBUILT_CLI_URL:=}"
+: "${CODEX_VM_PREBUILT_SANDBOX_URL:=}"
+: "${CODEX_VM_PREBUILT_WIN_CLI_URL:=}"
 : "${CODEX_VM_ENABLE_LINUX_UI_POLISH:?1}"
 : "${CODEX_VM_LINUX_ISO_URL:=https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso}"
 : "${CODEX_VM_USE_DEFAULT_UBUNTU_TEMPLATE:=0}"
@@ -38,9 +43,11 @@ ARTIFACT_ROOT="${4:-${CODEX_VM_ARTIFACT_DIR:?missing CODEX_VM_ARTIFACT_DIR}}"
 : "${CODEX_VM_WINDOWS_BASE_OVA:=}"
 : "${CODEX_VM_WINDOWS_BASE_ISO:=}"
 : "${CODEX_VM_GUEST_KEY:?$HOME/.ssh/id_ed25519}"
+: "${CODEX_VM_GUEST_KEY_STRATEGY:=managed}" # managed|provided
 
 CODEX_VM_WINDOWS_ISO_PATH="${CODEX_VM_WINDOWS_ISO_PATH:-}"
 CODEX_VM_BASE_MEDIA_DIR="${CODEX_VM_BASE_MEDIA_DIR:-$CODEX_VM_BASE_DIR/media}"
+CODEX_VM_LOCKS_DIR="${CODEX_VM_LOCKS_DIR:-$CODEX_VM_BASE_DIR/locks}"
 
 CODEX_VM_BASE_DIR="${CODEX_VM_BASE_DIR/#\~/$HOME}"
 CODEX_VM_BASE_MEDIA_DIR="${CODEX_VM_BASE_MEDIA_DIR/#\~/$HOME}"
@@ -55,9 +62,89 @@ CODEX_VM_LINUX_BASE_OVA="${CODEX_VM_LINUX_BASE_OVA/#\~/$HOME}"
 CODEX_VM_WINDOWS_BASE_OVA="${CODEX_VM_WINDOWS_BASE_OVA/#\~/$HOME}"
 
 mkdir -p "$CODEX_VM_BASE_DIR" "$CODEX_VM_BASE_MEDIA_DIR" "$ARTIFACT_ROOT"
+mkdir -p "$CODEX_VM_LOCKS_DIR"
 
 log() { printf '[codex-vm:remote] %s\n' "$*" >&2; }
 fatal() { printf '[codex-vm:remote] ERROR: %s\n' "$*" >&2; exit 1; }
+
+acquire_vm_lock() {
+  local vm="$1"
+  local lock_file="$CODEX_VM_LOCKS_DIR/${vm}.lock"
+
+  # IMPORTANT:
+  # Do NOT keep an open FD in this bash process for the duration of the build.
+  # VBoxManage/VBoxSVC can inherit that FD and keep the lock forever.
+  #
+  # Use a pidfile-style lock: if the owning PID is alive, treat it as active.
+  # This makes stale-lock recovery deterministic even if SSH drops mid-run.
+  if [[ -f "$lock_file" ]]; then
+    local existing_pid=""
+    existing_pid="$(awk -F= '/^pid=/{print $2; exit}' "$lock_file" 2>/dev/null || true)"
+
+    # Legacy lock format (timestamp-only). Clear it to avoid false positives.
+    if [[ -z "$existing_pid" ]]; then
+      log "Legacy VM lock detected (no pid); clearing: $lock_file"
+      rm -f "$lock_file" || true
+    elif kill -0 "$existing_pid" >/dev/null 2>&1; then
+      fatal "Another build-agent is already operating on VM '$vm' (lock: $lock_file, pid: $existing_pid)"
+    else
+      log "Stale VM lock detected (dead pid $existing_pid); clearing: $lock_file"
+      rm -f "$lock_file" || true
+    fi
+  fi
+
+  {
+    echo "pid=$$"
+    echo "started=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } >"$lock_file"
+  # Best-effort cleanup so subsequent runs don't trip the guard.
+  trap 'rm -f "'"$lock_file"'" >/dev/null 2>&1 || true' EXIT INT TERM HUP
+}
+
+guest_dockerhub_reachable() {
+  local user="$1"
+  local port="$2"
+  local auth_candidates="${3:-}"
+
+  # Docker Hub connectivity from the guest is required only when we need to
+  # build/pull images inside the guest. Some host networks allow the host but
+  # not the VirtualBox NAT guest to reach registry-1.docker.io.
+  run_guest_ssh "$user" "$port" "curl -fsSI --max-time 8 https://registry-1.docker.io/v2/ >/dev/null" "$auth_candidates" >/dev/null 2>&1
+  local rc=$?
+  [[ "$rc" -eq 0 ]]
+}
+
+seed_guest_codex_builder_image() {
+  local user="$1"
+  local port="$2"
+  local auth_candidates="${3:-}"
+
+  # If the guest already has the image, nothing to do.
+  if run_guest_ssh "$user" "$port" "docker image inspect codex-builder >/dev/null 2>&1" "$auth_candidates" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Build on the host (arch-cachy) using podman (installed there), then stream
+  # the image into the guest with docker load. This bypasses guest Docker Hub
+  # connectivity entirely.
+  if ! command -v podman >/dev/null 2>&1; then
+    log "podman not available on host; cannot seed codex-builder image for guest"
+    return 1
+  fi
+
+  log "Seeding codex-builder image into guest (host build via podman -> docker load)"
+  podman build -t codex-builder "$SOURCE_DIR" >/dev/null
+
+  # Ensure guest docker socket is usable without sudo (streaming requires stdin).
+  run_guest_ssh "$user" "$port" "chmod 666 /var/run/docker.sock 2>/dev/null || true" "$auth_candidates" >/dev/null 2>&1 || true
+
+  # Stream image tarball into guest docker.
+  podman save codex-builder | ssh -i "$CODEX_VM_GUEST_KEY" \
+    -o BatchMode=yes \
+    -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+    -o ConnectTimeout=15 -p "$port" \
+    "$user@127.0.0.1" "docker load >/dev/null"
+}
 
 port_is_free() {
   local port="$1"
@@ -106,25 +193,73 @@ pick_free_port() {
 import socket
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.bind(("0.0.0.0", 0))
-print(s.getsockname()[1])
-s.close()
+  print(s.getsockname()[1])
+  s.close()
 PY
+}
+
+resolve_release_tag() {
+  local tag="$1"
+  local latest=""
+  if [[ -n "$tag" && "$tag" != "latest-tag" ]]; then
+    printf '%s\n' "$tag"
+    return 0
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    if command -v jq >/dev/null 2>&1; then
+      latest="$(curl -fsSL https://api.github.com/repos/openai/codex/releases/latest | jq -r '.tag_name' 2>/dev/null || true)"
+    else
+      latest="$(curl -fsSL https://api.github.com/repos/openai/codex/releases/latest | sed -n 's/.*\"tag_name\": \"\\([^\"]*\\)\".*/\\1/p' | head -n1 || true)"
+    fi
+  fi
+
+  if [[ -n "$latest" && "$latest" != "null" ]]; then
+    printf '%s\n' "$latest"
+  else
+    printf '%s\n' "rust-v0.101.0"
+  fi
+}
+
+ensure_prebuilt_urls() {
+  if [[ "$CODEX_VM_SKIP_RUST_BUILD" != "1" ]]; then
+    return 0
+  fi
+
+  local resolved_tag
+  resolved_tag="$(resolve_release_tag "$CODEX_VM_CODEX_GIT_REF")"
+  CODEX_VM_CODEX_GIT_REF="$resolved_tag"
+  CODEX_VM_PREBUILT_CLI_URL="${CODEX_VM_PREBUILT_CLI_URL:-https://github.com/openai/codex/releases/download/${resolved_tag}/codex-x86_64-unknown-linux-gnu.tar.gz}"
+  CODEX_VM_PREBUILT_WIN_CLI_URL="${CODEX_VM_PREBUILT_WIN_CLI_URL:-https://github.com/openai/codex/releases/download/${resolved_tag}/codex-x86_64-pc-windows-msvc.exe}"
 }
 
 ensure_usable_guest_key() {
   local candidate_key="$1"
   local generated_key="$CODEX_VM_BASE_DIR/.codex-vm/guest-key"
 
-  if [[ -f "$candidate_key" ]] && ssh-keygen -y -P '' -f "$candidate_key" >/dev/null 2>&1; then
-    CODEX_VM_GUEST_KEY="$candidate_key"
-    return 0
+  # IMPORTANT:
+  # The guest SSH key must live on the VM host (this machine) because this
+  # machine is the one that actually connects to guests over 127.0.0.1:PORT.
+  # Using a Mac path (or assuming identical ~/.ssh keys across machines) is a
+  # common source of "authorized_keys doesn't match" failures.
+  if [[ "$CODEX_VM_GUEST_KEY_STRATEGY" != "provided" ]]; then
+    candidate_key="$generated_key"
   fi
 
-  mkdir -p "$(dirname "$generated_key")"
-  if [[ ! -f "$generated_key" || ! -f "${generated_key}.pub" ]]; then
-    ssh-keygen -t ed25519 -N '' -f "$generated_key" -C "codex-vm-autogen" >/dev/null
+  if [[ -f "$candidate_key" ]] && ssh-keygen -y -P '' -f "$candidate_key" >/dev/null 2>&1; then
+    CODEX_VM_GUEST_KEY="$candidate_key"
+  else
+    mkdir -p "$(dirname "$generated_key")"
+    if [[ ! -f "$generated_key" || ! -f "${generated_key}.pub" ]]; then
+      ssh-keygen -t ed25519 -N '' -f "$generated_key" -C "codex-vm-autogen" >/dev/null
+    fi
+    CODEX_VM_GUEST_KEY="$generated_key"
   fi
-  CODEX_VM_GUEST_KEY="$generated_key"
+
+  # Ensure the public key exists for bootstrap + key install steps.
+  if [[ ! -f "${CODEX_VM_GUEST_KEY}.pub" ]]; then
+    ssh-keygen -y -f "$CODEX_VM_GUEST_KEY" > "${CODEX_VM_GUEST_KEY}.pub" 2>/dev/null || true
+  fi
 }
 
 guest_askpass_script() {
@@ -139,6 +274,110 @@ printf '%s' '$escaped_pass'
 EOF_ASKPASS
   chmod 700 "$script_file"
   echo "$script_file"
+}
+
+run_guest_password_ssh_once() {
+  local user="$1"
+  local port="$2"
+  local cmd="$3"
+
+  if [[ -z "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
+    return 255
+  fi
+
+  local ssh_opts=(
+    -o BatchMode=no
+    -o PreferredAuthentications=password
+    -o PubkeyAuthentication=no
+    -o PasswordAuthentication=yes
+    -o KbdInteractiveAuthentication=no
+    -o UserKnownHostsFile=/dev/null
+    -o GlobalKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking=no
+    -o ConnectTimeout=15
+    -p "$port"
+  )
+
+  if command -v sshpass >/dev/null 2>&1; then
+    sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+      ssh "${ssh_opts[@]}" "$user@127.0.0.1" "$cmd"
+    return $?
+  fi
+
+  local askpass_script=""
+  askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
+  SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
+    setsid ssh "${ssh_opts[@]}" "$user@127.0.0.1" "$cmd" < /dev/null
+  local rc=$?
+  rm -f "$askpass_script"
+  return "$rc"
+}
+
+ensure_guest_key_authorized() {
+  local user="$1"
+  local port="$2"
+
+  if [[ ! -f "$CODEX_VM_GUEST_KEY" ]]; then
+    return 255
+  fi
+
+  if [[ ! -f "${CODEX_VM_GUEST_KEY}.pub" ]]; then
+    ssh-keygen -y -f "$CODEX_VM_GUEST_KEY" > "${CODEX_VM_GUEST_KEY}.pub" 2>/dev/null || true
+  fi
+  if [[ ! -f "${CODEX_VM_GUEST_KEY}.pub" ]]; then
+    log "Guest key pub missing and could not be generated: ${CODEX_VM_GUEST_KEY}.pub"
+    return 255
+  fi
+
+  local ssh_check_opts=(
+    -o BatchMode=yes
+    -o PreferredAuthentications=publickey
+    -o PasswordAuthentication=no
+    -o PubkeyAuthentication=yes
+    -o UserKnownHostsFile=/dev/null
+    -o GlobalKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking=no
+    -o ConnectTimeout=10
+    -p "$port"
+  )
+  if ssh -i "$CODEX_VM_GUEST_KEY" "${ssh_check_opts[@]}" "$user@127.0.0.1" "echo codex-vm-key-ok" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  # Key auth didn't work (common when reusing an existing VM whose authorized_keys
+  # contains an older key). Install/append the current public key using password SSH.
+  local pub_b64=""
+  if command -v base64 >/dev/null 2>&1; then
+    pub_b64="$(base64 -w 0 "${CODEX_VM_GUEST_KEY}.pub" 2>/dev/null || base64 "${CODEX_VM_GUEST_KEY}.pub" | tr -d '\n')"
+  fi
+  if [[ -z "$pub_b64" ]]; then
+    log "base64 missing or failed; cannot install guest pubkey automatically"
+    return 255
+  fi
+
+  log "Installing current guest pubkey into ${user}@127.0.0.1:${port} authorized_keys (password SSH)"
+  run_guest_password_ssh_once "$user" "$port" "
+    set -eu
+    umask 077
+    mkdir -p \"\$HOME/.ssh\"
+    chmod 700 \"\$HOME/.ssh\" 2>/dev/null || true
+    touch \"\$HOME/.ssh/authorized_keys\"
+    chmod 600 \"\$HOME/.ssh/authorized_keys\" 2>/dev/null || true
+    KEY_B64='$pub_b64'
+    key=\"\$(printf '%s' \"\$KEY_B64\" | base64 -d)\"
+    grep -qxF \"\$key\" \"\$HOME/.ssh/authorized_keys\" 2>/dev/null || printf '%s\n' \"\$key\" >> \"\$HOME/.ssh/authorized_keys\"
+  "
+  local rc=$?
+  if (( rc != 0 )); then
+    return "$rc"
+  fi
+
+  if ssh -i "$CODEX_VM_GUEST_KEY" "${ssh_check_opts[@]}" "$user@127.0.0.1" "echo codex-vm-key-ok" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  log "Guest pubkey install step succeeded but key auth still failing for ${user}@127.0.0.1:${port}"
+  return 255
 }
 
 CODEX_VM_GUEST_AUTH_ATTEMPTS=""
@@ -197,9 +436,20 @@ guest_auth_candidates() {
     fi
   done
 
+  # Always try the requested primary user first (even if it appears later in the
+  # candidate list), then fall back to other candidates only on SSH transport
+  # failure (exit 255). This keeps "try root" calls from wasting time under
+  # non-root users.
   if [[ -z "${seen[$primary_user]-}" ]]; then
     result=("$primary_user" "${result[@]}")
     seen["$primary_user"]=1
+  elif (( ${#result[@]} > 0 )) && [[ "${result[0]}" != "$primary_user" ]]; then
+    local -a reordered=("$primary_user")
+    for token in "${result[@]}"; do
+      [[ "$token" == "$primary_user" ]] && continue
+      reordered+=("$token")
+    done
+    result=("${reordered[@]}")
   fi
 
   printf '%s\n' "${result[@]}"
@@ -252,19 +502,11 @@ run_guest_ssh_once() {
   local port="$2"
   local cmd="$3"
   local askpass_script=""
-  local askpass_cmd=(
-    -o PreferredAuthentications=password
-    -o PubkeyAuthentication=no
-    -o PasswordAuthentication=yes
-    -o KbdInteractiveAuthentication=no
-    -o BatchMode=no
-  )
-  local ssh_opts=(
+  local ssh_base_opts=(
     -o UserKnownHostsFile=/dev/null
     -o GlobalKnownHostsFile=/dev/null
     -o StrictHostKeyChecking=no
     -o ConnectTimeout=15
-    -o BatchMode=yes
     -p "$port"
   )
 
@@ -273,15 +515,28 @@ run_guest_ssh_once() {
     while ((attempt <= 8)); do
       local attempt_err
       attempt_err="$(mktemp)"
-      if ssh -i "$CODEX_VM_GUEST_KEY" \
-        -o PasswordAuthentication=no -o PubkeyAuthentication=yes \
-        "${ssh_opts[@]}" \
-        "$user@127.0.0.1" "$cmd" 2>"$attempt_err"; then
+      ssh -i "$CODEX_VM_GUEST_KEY" \
+        -o BatchMode=yes \
+        -o PreferredAuthentications=publickey \
+        -o PasswordAuthentication=no \
+        -o PubkeyAuthentication=yes \
+        "${ssh_base_opts[@]}" \
+        "$user@127.0.0.1" "$cmd" 2>"$attempt_err"
+      local rc=$?
+      if (( rc == 0 )); then
         rm -f "$attempt_err"
         CODEX_VM_GUEST_USER="$user"
         CODEX_VM_GUEST_AUTH_MODE="key"
         return 0
       fi
+      # Only retry key auth when the SSH transport/auth actually failed.
+      if (( rc != 255 )); then
+        rm -f "$attempt_err"
+        CODEX_VM_GUEST_USER="$user"
+        CODEX_VM_GUEST_AUTH_MODE="key"
+        return "$rc"
+      fi
+
       capture_auth_attempt "$user" "key" "$attempt" "$attempt_err"
       rm -f "$attempt_err"
       log "SSH key attempt ${attempt}/8 failed for $user@127.0.0.1:$port; retrying..."
@@ -291,7 +546,7 @@ run_guest_ssh_once() {
   fi
 
   if [[ -z "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
-    return 1
+    return 255
   fi
 
   askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
@@ -301,34 +556,69 @@ run_guest_ssh_once() {
     log "Falling back to password SSH for $user@127.0.0.1:$port (attempt ${attempt}/8)"
     local attempt_err
     attempt_err="$(mktemp)"
+    local rc=255
     if command -v sshpass >/dev/null 2>&1; then
-      if SSH_AUTH_SOCK= SSH_ASKPASS= SSH_ASKPASS_REQUIRE=force sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
-        ssh "${askpass_cmd[@]}" "${ssh_opts[@]}" "$user@127.0.0.1" "$cmd" 2>"$attempt_err"; then
-        rm -f "$askpass_script"
-        CODEX_VM_GUEST_USER="$user"
-        CODEX_VM_GUEST_AUTH_MODE="password"
-        return 0
-      fi
-      capture_auth_attempt "$user" "sshpass" "$attempt" "$attempt_err"
-    fi
-
-    if SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
-      setsid ssh "${askpass_cmd[@]}" "${ssh_opts[@]}" "$user@127.0.0.1" "$cmd" < /dev/null 2>"$attempt_err"; then
+      SSH_AUTH_SOCK= SSH_ASKPASS= SSH_ASKPASS_REQUIRE=force \
+        sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+        ssh \
+          -o BatchMode=no \
+          -o PreferredAuthentications=password \
+          -o PubkeyAuthentication=no \
+          -o PasswordAuthentication=yes \
+          -o KbdInteractiveAuthentication=no \
+          "${ssh_base_opts[@]}" \
+          "$user@127.0.0.1" "$cmd" 2>"$attempt_err"
+      rc=$?
+      if (( rc == 0 )); then
         rm -f "$attempt_err"
         rm -f "$askpass_script"
         CODEX_VM_GUEST_USER="$user"
         CODEX_VM_GUEST_AUTH_MODE="password"
         return 0
       fi
-      capture_auth_attempt "$user" "askpass" "$attempt" "$attempt_err"
+      if (( rc != 255 )); then
+        rm -f "$attempt_err"
+        rm -f "$askpass_script"
+        CODEX_VM_GUEST_USER="$user"
+        CODEX_VM_GUEST_AUTH_MODE="password"
+        return "$rc"
+      fi
+      capture_auth_attempt "$user" "sshpass" "$attempt" "$attempt_err"
+    fi
+
+    SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
+      setsid ssh \
+        -o BatchMode=no \
+        -o PreferredAuthentications=password \
+        -o PubkeyAuthentication=no \
+        -o PasswordAuthentication=yes \
+        -o KbdInteractiveAuthentication=no \
+        "${ssh_base_opts[@]}" \
+        "$user@127.0.0.1" "$cmd" < /dev/null 2>"$attempt_err"
+    rc=$?
+    if (( rc == 0 )); then
       rm -f "$attempt_err"
+      rm -f "$askpass_script"
+      CODEX_VM_GUEST_USER="$user"
+      CODEX_VM_GUEST_AUTH_MODE="password"
+      return 0
+    fi
+    if (( rc != 255 )); then
+      rm -f "$attempt_err"
+      rm -f "$askpass_script"
+      CODEX_VM_GUEST_USER="$user"
+      CODEX_VM_GUEST_AUTH_MODE="password"
+      return "$rc"
+    fi
+    capture_auth_attempt "$user" "askpass" "$attempt" "$attempt_err"
+    rm -f "$attempt_err"
     ((attempt += 1))
     sleep 2
   done
 
   rm -f "$askpass_script"
   log "Password SSH failed for $user@127.0.0.1:$port"
-  return 1
+  return 255
 }
 
 run_guest_ssh() {
@@ -343,9 +633,14 @@ run_guest_ssh() {
   mapfile -t users < <(guest_auth_candidates "$user" "$fallback_list")
 
   for fallback_user in "${users[@]}"; do
-    if run_guest_ssh_once "$fallback_user" "$port" "$cmd"; then
+    run_guest_ssh_once "$fallback_user" "$port" "$cmd"
+    local rc=$?
+    # Only retry auth/user candidates when the SSH transport itself failed.
+    # If the remote command ran and exited non-zero, propagate that code
+    # directly so callers don't spam retries and alternate users.
+    if (( rc != 255 )); then
       CODEX_VM_GUEST_USER="$fallback_user"
-      return 0
+      return "$rc"
     fi
   done
 
@@ -363,77 +658,107 @@ run_guest_scp_from() {
   local dst="$4"
   local candidate_list="${5:-}"
   reset_auth_attempts
-  local askpass_script=""
-  local askpass_cmd=(
-    -o PreferredAuthentications=password
-    -o PubkeyAuthentication=no
-    -o PasswordAuthentication=yes
-    -o KbdInteractiveAuthentication=no
-  )
-  local scp_opts=(
-    -o UserKnownHostsFile=/dev/null
-    -o GlobalKnownHostsFile=/dev/null
-    -o StrictHostKeyChecking=no
-    -P "$port"
-  )
   local -a users=()
   local fallback_user
 
   mapfile -t users < <(guest_auth_candidates "$user" "$candidate_list")
 
   for fallback_user in "${users[@]}"; do
-    if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
-      local attempt=1
-      while ((attempt <= 8)); do
-        local attempt_err
-        attempt_err="$(mktemp)"
-        if scp -i "$CODEX_VM_GUEST_KEY" "${scp_opts[@]}" \
-          -o BatchMode=yes \
-          "$fallback_user@127.0.0.1:$src" "$dst" 2>"$attempt_err"; then
-          rm -f "$attempt_err"
-          CODEX_VM_GUEST_USER="$fallback_user"
-          return 0
-        fi
-        capture_auth_attempt "$fallback_user" "key" "$attempt" "$attempt_err"
-        log "SCP key attempt ${attempt}/8 failed for $fallback_user@127.0.0.1:$port; retrying..."
-        rm -f "$attempt_err"
-        ((attempt += 1))
-        sleep 2
-      done
-    fi
-
-    if [[ -z "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
-      continue
-    fi
-
-    askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
     local attempt=1
     while ((attempt <= 8)); do
-      local attempt_err
-      attempt_err="$(mktemp)"
-      log "Falling back to password SCP for $fallback_user@127.0.0.1:$port (attempt ${attempt}/8)"
-      if command -v sshpass >/dev/null 2>&1; then
-        if SSH_AUTH_SOCK= SSH_ASKPASS= SSH_ASKPASS_REQUIRE=force \
-          sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
-          scp "${askpass_cmd[@]}" "${scp_opts[@]}" "$fallback_user@127.0.0.1:$src" "$dst" 2>"$attempt_err"; then
-          rm -f "$askpass_script"
-          rm -f "$attempt_err"
+      local ssh_opts=(
+        -o UserKnownHostsFile=/dev/null
+        -o GlobalKnownHostsFile=/dev/null
+        -o StrictHostKeyChecking=no
+        -o ConnectTimeout=15
+        -p "$port"
+      )
+
+      if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
+        local tmp_out
+        tmp_out="$(mktemp)"
+        ssh -i "$CODEX_VM_GUEST_KEY" \
+          -o BatchMode=yes \
+          -o PreferredAuthentications=publickey \
+          -o PasswordAuthentication=no \
+          -o PubkeyAuthentication=yes \
+          "${ssh_opts[@]}" \
+          "$fallback_user@127.0.0.1" "cat '$src'" > "$tmp_out"
+        local rc=$?
+        if (( rc == 0 )); then
+          mkdir -p "$(dirname "$dst")"
+          mv "$tmp_out" "$dst"
           CODEX_VM_GUEST_USER="$fallback_user"
           return 0
         fi
+        rm -f "$tmp_out"
+        if (( rc != 255 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return "$rc"
+        fi
+        capture_auth_attempt "$fallback_user" "key" "$attempt" /dev/null
       fi
 
-      if SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
-        setsid scp "${askpass_cmd[@]}" "${scp_opts[@]}" "$fallback_user@127.0.0.1:$src" "$dst" < /dev/null 2>"$attempt_err"; then
+      # Password fallback: safe for pull because we don't need stdin for the
+      # transfer (ssh writes file bytes to stdout). This works with SSH_ASKPASS.
+      if [[ -n "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
+        if command -v sshpass >/dev/null 2>&1; then
+          local tmp_out
+          tmp_out="$(mktemp)"
+          sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+            ssh \
+              -o BatchMode=no \
+              -o PreferredAuthentications=password \
+              -o PubkeyAuthentication=no \
+              -o PasswordAuthentication=yes \
+              -o KbdInteractiveAuthentication=no \
+              "${ssh_opts[@]}" \
+              "$fallback_user@127.0.0.1" "cat '$src'" > "$tmp_out"
+          local rc=$?
+          if (( rc == 0 )); then
+            mkdir -p "$(dirname "$dst")"
+            mv "$tmp_out" "$dst"
+            CODEX_VM_GUEST_USER="$fallback_user"
+            return 0
+          fi
+          rm -f "$tmp_out"
+          if (( rc != 255 )); then
+            CODEX_VM_GUEST_USER="$fallback_user"
+            return "$rc"
+          fi
+          capture_auth_attempt "$fallback_user" "sshpass" "$attempt" /dev/null
+        fi
+
+        local askpass_script=""
+        askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
+        local tmp_out
+        tmp_out="$(mktemp)"
+        SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
+          setsid ssh \
+            -o BatchMode=no \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o PasswordAuthentication=yes \
+            -o KbdInteractiveAuthentication=no \
+            "${ssh_opts[@]}" \
+            "$fallback_user@127.0.0.1" "cat '$src'" > "$tmp_out"
+        local rc=$?
         rm -f "$askpass_script"
-        rm -f "$attempt_err"
-        CODEX_VM_GUEST_USER="$fallback_user"
-        return 0
+        if (( rc == 0 )); then
+          mkdir -p "$(dirname "$dst")"
+          mv "$tmp_out" "$dst"
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return 0
+        fi
+        rm -f "$tmp_out"
+        if (( rc != 255 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return "$rc"
+        fi
+        capture_auth_attempt "$fallback_user" "askpass" "$attempt" /dev/null
       fi
-      capture_auth_attempt "$fallback_user" "password" "$attempt" "$attempt_err"
-      log "Password SCP attempt ${attempt}/8 failed for $fallback_user@127.0.0.1:$port; retrying..."
-      rm -f "$askpass_script"
-      rm -f "$attempt_err"
+
+      log "Guest pull attempt ${attempt}/8 failed for ${fallback_user}@127.0.0.1:${port}; retrying..."
       ((attempt += 1))
       sleep 2
     done
@@ -443,7 +768,7 @@ run_guest_scp_from() {
     log "SCP auth attempts: $CODEX_VM_GUEST_AUTH_ATTEMPTS"
   fi
   log "Password SCP failed for $user@127.0.0.1:$port"
-  return 1
+  return 255
 }
 
 vm_exists() {
@@ -683,8 +1008,12 @@ vm_set_nat_ssh() {
   local vm="$1"
   local port="$2"
 
+  # NOTE:
+  # The host port can legitimately appear "in use" when it's already forwarded
+  # by VirtualBox NAT (VBox listens on the port). Treat that as a warning and
+  # still attempt to (re)apply NAT PF; failing here causes unnecessary churn.
   if ! port_is_free "$port"; then
-    fatal "requested host SSH forward port is already in use on VM host: $port"
+    log "requested host SSH forward port appears in use ($port); attempting NAT PF update anyway"
   fi
 
   # When a VM is running or has an active session, `modifyvm` can fail with a lock error.
@@ -950,6 +1279,21 @@ done
 (systemctl restart ssh || systemctl restart ssh.socket || true)
 (DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io git rsync curl ca-certificates file libfuse2 >/dev/null 2>&1 || true)
 (systemctl enable --now docker || true)
+
+for BOOT_USER in $BOOTSTRAP_USERS; do
+  if [ -z "$BOOT_USER" ] || [ "$BOOT_USER" = "root" ]; then
+    continue
+  fi
+  if id "$BOOT_USER" >/dev/null 2>&1; then
+    BOOT_HOME="$(getent passwd "$BOOT_USER" | awk -F: '{print $6}' | head -n1)"
+    if [ -z "$BOOT_HOME" ]; then
+      BOOT_HOME="/home/$BOOT_USER"
+    fi
+    log "installing mise for ${BOOT_USER}"
+    su - "$BOOT_USER" -c 'curl -fsSL https://mise.jdx.dev/install.sh | sh' || true
+  fi
+done
+
 log "bootstrap complete"
 BOOTSTRAP
 )"
@@ -1072,13 +1416,6 @@ copy_to_guest_once() {
   local port="$2"
   local src="$3"
   local dst="$4"
-  local askpass_script=""
-  local askpass_cmd=(
-    -o PreferredAuthentications=password
-    -o PubkeyAuthentication=no
-    -o PasswordAuthentication=yes
-    -o KbdInteractiveAuthentication=no
-  )
   local attempt=1
 
   if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
@@ -1086,12 +1423,18 @@ copy_to_guest_once() {
     while ((attempt <= 8)); do
       local attempt_err
       attempt_err="$(mktemp)"
-      if rsync -az --delete \
+      rsync -az --delete \
         --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
         -e "ssh -i '$CODEX_VM_GUEST_KEY' -p '$port' -o BatchMode=yes -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no" \
-        "$src/" "${user}@127.0.0.1:$dst/" 2>"$attempt_err"; then
+        "$src/" "${user}@127.0.0.1:$dst/" 2>"$attempt_err"
+      local rc=$?
+      if (( rc == 0 )); then
         rm -f "$attempt_err"
         return 0
+      fi
+      if (( rc != 255 )); then
+        rm -f "$attempt_err"
+        return "$rc"
       fi
       capture_auth_attempt "$user" "key" "$attempt" "$attempt_err"
       log "rsync key attempt ${attempt}/8 failed for ${user}@127.0.0.1:$port; retrying..."
@@ -1103,53 +1446,84 @@ copy_to_guest_once() {
 
   log "copy_to_guest using password-based rsync fallback for ${user}@127.0.0.1:$port"
   if [[ -z "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
-    return 1
+    return 255
   fi
 
-  askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
+  # rsync/scp require stdin for data transfer; SSH_ASKPASS-based tricks break
+  # these. Only support password rsync if sshpass is installed.
+  if ! command -v sshpass >/dev/null 2>&1; then
+    log "sshpass not installed on host; cannot do password-based rsync/scp. Fix guest key auth or install sshpass."
+    return 255
+  fi
 
   attempt=1
   while ((attempt <= 8)); do
-    if command -v sshpass >/dev/null 2>&1; then
-      local attempt_err
-      attempt_err="$(mktemp)"
-      if SSH_AUTH_SOCK= SSH_ASKPASS= SSH_ASKPASS_REQUIRE=force \
-        sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
-        rsync -az --delete \
-        --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
-        -e "ssh ${askpass_cmd[*]} -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -p '$port'" \
-        "$src/" "${user}@127.0.0.1:$dst/" 2>"$attempt_err"; then
-        rm -f "$askpass_script"
-        rm -f "$attempt_err"
-        return 0
-      fi
-      capture_auth_attempt "$user" "password-sshpass" "$attempt" "$attempt_err"
-      rm -f "$attempt_err"
-    fi
-
     local attempt_err
     attempt_err="$(mktemp)"
-    if SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
-      setsid rsync -az --delete \
-        --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
-        -e "ssh ${askpass_cmd[*]} -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -p '$port'" \
-        "$src/" "${user}@127.0.0.1:$dst/" < /dev/null 2>"$attempt_err"; then
-      rm -f "$askpass_script"
+    SSH_AUTH_SOCK= SSH_ASKPASS= SSH_ASKPASS_REQUIRE=force \
+      sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+      rsync -az --delete \
+      --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
+      -e "ssh -o BatchMode=no -o PreferredAuthentications=password -o PubkeyAuthentication=no -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -p '$port'" \
+      "$src/" "${user}@127.0.0.1:$dst/" 2>"$attempt_err"
+    local rc=$?
+    if (( rc == 0 )); then
       rm -f "$attempt_err"
-      rm -f "$askpass_script"
       return 0
     fi
-    capture_auth_attempt "$user" "password-askpass" "$attempt" "$attempt_err"
+    if (( rc != 255 )); then
+      rm -f "$attempt_err"
+      return "$rc"
+    fi
+    capture_auth_attempt "$user" "password-sshpass" "$attempt" "$attempt_err"
     log "Password rsync attempt ${attempt}/8 failed for ${user}@127.0.0.1:$port; retrying..."
-    rm -f "$askpass_script"
     rm -f "$attempt_err"
     ((attempt += 1))
     sleep 2
   done
 
-  rm -f "$askpass_script"
-  log "Password rsync failed for ${user}@127.0.0.1:$port"
-  return 1
+  log "Password rsync failed for ${user}@127.0.0.1:$port; trying tar-over-ssh fallback"
+
+  # tar-over-ssh fallback: pipe tarball through ssh directly (bypasses rsync auth issues)
+  local tar_tmp="/tmp/codex-vm-tarsync-$$.tar.gz"
+  tar -czf "$tar_tmp" \
+    --exclude='.git' --exclude='dist' --exclude='.mise' --exclude='.github' --exclude='infra/vm/artifacts' \
+    -C "$src" .
+
+  local ssh_opts=(
+    -o UserKnownHostsFile=/dev/null
+    -o GlobalKnownHostsFile=/dev/null
+    -o StrictHostKeyChecking=no
+    -o ConnectTimeout=15
+    -p "$port"
+  )
+  local tar_ok=0
+
+  # Try key auth
+  if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
+    if ssh -i "$CODEX_VM_GUEST_KEY" -o BatchMode=yes -o PasswordAuthentication=no -o PubkeyAuthentication=yes \
+      "${ssh_opts[@]}" "$user@127.0.0.1" "mkdir -p '$dst' && tar -xzf - -C '$dst'" < "$tar_tmp" 2>/dev/null; then
+      tar_ok=1
+    fi
+  fi
+
+  # Try password auth via sshpass
+  if [[ "$tar_ok" -eq 0 && -n "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
+    if sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+      ssh -o PreferredAuthentications=password -o PubkeyAuthentication=no -o PasswordAuthentication=yes \
+      -o KbdInteractiveAuthentication=no -o BatchMode=no \
+      "${ssh_opts[@]}" "$user@127.0.0.1" "mkdir -p '$dst' && tar -xzf - -C '$dst'" < "$tar_tmp" 2>/dev/null; then
+      tar_ok=1
+    fi
+  fi
+
+  rm -f "$tar_tmp"
+  if [[ "$tar_ok" -eq 1 ]]; then
+    log "tar-over-ssh succeeded for ${user}@127.0.0.1:$port"
+    return 0
+  fi
+  log "tar-over-ssh fallback also failed for ${user}@127.0.0.1:$port"
+  return 255
 }
 
 copy_to_guest() {
@@ -1164,16 +1538,22 @@ copy_to_guest() {
 
   mapfile -t users < <(guest_auth_candidates "$user" "$candidate_list")
   for fallback_user in "${users[@]}"; do
-    if copy_to_guest_once "$fallback_user" "$port" "$src" "$dst"; then
+    copy_to_guest_once "$fallback_user" "$port" "$src" "$dst"
+    local rc=$?
+    if (( rc == 0 )); then
       CODEX_VM_GUEST_USER="$fallback_user"
       return 0
+    fi
+    if (( rc != 255 )); then
+      CODEX_VM_GUEST_USER="$fallback_user"
+      return "$rc"
     fi
   done
 
   if [[ -n "$CODEX_VM_GUEST_AUTH_ATTEMPTS" ]]; then
     log "copy_to_guest attempts: $CODEX_VM_GUEST_AUTH_ATTEMPTS"
   fi
-  return 1
+  return 255
 }
 
 download_media_file() {
@@ -1215,6 +1595,58 @@ discover_media_file() {
     done
   done
   return 1
+}
+
+discover_appliance_file() {
+  local configured="$1"
+  if [[ -n "$configured" ]]; then
+    if [[ -f "$configured" ]]; then
+      echo "$configured"
+      return 0
+    fi
+    log "Configured base appliance not found, ignoring: $configured"
+  fi
+
+  # Prefer CODEX_VM_BASE_MEDIA_DIR for curated appliances.
+  if [[ -d "$CODEX_VM_BASE_MEDIA_DIR" ]]; then
+    local found
+    found="$(find "$CODEX_VM_BASE_MEDIA_DIR" -maxdepth 4 -type f \( -iname '*.ova' -o -iname '*.ovf' \) 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$found" ]]; then
+      echo "$found"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+resolve_linux_base_appliance() {
+  discover_appliance_file "$CODEX_VM_LINUX_BASE_OVA"
+}
+
+resolve_windows_base_appliance() {
+  local configured="${1:-}"
+  if [[ -n "$configured" ]]; then
+    if [[ -f "$configured" ]]; then
+      local lower_path=""
+      lower_path="$(basename "$configured" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$lower_path" == *windows* || "$lower_path" == *win* ]]; then
+        echo "$configured"
+        return 0
+      fi
+      log "Configured CODEX_VM_WINDOWS_BASE_OVA does not look like Windows media, ignoring: $configured"
+    else
+      log "Configured base appliance not found, ignoring: $configured"
+    fi
+  fi
+
+  if [[ -d "$CODEX_VM_BASE_MEDIA_DIR" ]]; then
+    local found
+    found="$(find "$CODEX_VM_BASE_MEDIA_DIR" -maxdepth 4 -type f \( -iname '*windows*.ova' -o -iname '*win*.ova' \) 2>/dev/null | head -n 1 || true)"
+    if [[ -n "$found" ]]; then
+      echo "$found"
+      return 0
+    fi
+  fi
 }
 
 resolve_linux_base_iso() {
@@ -1281,16 +1713,25 @@ resolve_windows_base_iso() {
 }
 
 prepare_base_media() {
-  if [[ -z "$CODEX_VM_LINUX_BASE_OVA" ]]; then
-    CODEX_VM_LINUX_BASE_ISO="$(resolve_linux_base_iso "$CODEX_VM_LINUX_BASE_ISO" "$CODEX_VM_LINUX_ISO_URL")"
-  else
+  # Prefer curated appliances when present; fall back to ISO unattended installs.
+  local linux_appliance=""
+  linux_appliance="$(resolve_linux_base_appliance || true)"
+  if [[ -n "$linux_appliance" ]]; then
+    CODEX_VM_LINUX_BASE_OVA="$linux_appliance"
     CODEX_VM_LINUX_BASE_ISO=""
+  else
+    CODEX_VM_LINUX_BASE_ISO="$(resolve_linux_base_iso "$CODEX_VM_LINUX_BASE_ISO" "$CODEX_VM_LINUX_ISO_URL")"
+    CODEX_VM_LINUX_BASE_OVA=""
   fi
 
-  if [[ -z "$CODEX_VM_WINDOWS_BASE_OVA" ]]; then
-    CODEX_VM_WINDOWS_BASE_ISO="$(resolve_windows_base_iso "$CODEX_VM_WINDOWS_BASE_ISO")"
-  else
+  local windows_appliance=""
+  windows_appliance="$(resolve_windows_base_appliance || true)"
+  if [[ -n "$windows_appliance" ]]; then
+    CODEX_VM_WINDOWS_BASE_OVA="$windows_appliance"
     CODEX_VM_WINDOWS_BASE_ISO=""
+  else
+    CODEX_VM_WINDOWS_BASE_ISO="$(resolve_windows_base_iso "$CODEX_VM_WINDOWS_BASE_ISO")"
+    CODEX_VM_WINDOWS_BASE_OVA=""
   fi
 
   CODEX_VM_WINDOWS_ISO_PATH="${CODEX_VM_WINDOWS_ISO_PATH:-$CODEX_VM_WINDOWS_BASE_ISO}"
@@ -1340,6 +1781,9 @@ collect_linux_debug_artifacts() {
   fi
 
   run_guest_scp_from "root" "$CODEX_VM_LINUX_SSH_PORT" "/root/.codex-vm/bootstrap.log" "$debug_dir/bootstrap.log" \
+    "${CODEX_VM_GUEST_AUTH_USERS:-$CODEX_VM_LINUX_GUEST_USER ubuntu root}" || true
+  run_guest_scp_from "${original_user:-$CODEX_VM_LINUX_GUEST_USER}" "$CODEX_VM_LINUX_SSH_PORT" \
+    "${CODEX_VM_LINUX_WORKSPACE}/.codex-vm-output/build.log" "$debug_dir/guest-build.log" \
     "${CODEX_VM_GUEST_AUTH_USERS:-$CODEX_VM_LINUX_GUEST_USER ubuntu root}" || true
   if [[ -n "$CODEX_VM_GUEST_AUTH_ATTEMPTS" ]]; then
     printf '%s\n' "$CODEX_VM_GUEST_AUTH_ATTEMPTS" > "$debug_dir/auth-attempts.log"
@@ -1402,6 +1846,7 @@ EOF
 }
 
 run_linux() {
+  acquire_vm_lock "$CODEX_VM_LINUX_VM_NAME"
   CODEX_VM_GUEST_PASSWORD="${CODEX_VM_GUEST_PASSWORD:-$CODEX_VM_LINUX_GUEST_PASSWORD}"
 
   local preferred_port="$CODEX_VM_LINUX_SSH_PORT"
@@ -1418,10 +1863,7 @@ run_linux() {
   local auth_error=""
   local build_error=""
   local build_out_dir
-  CODEX_VM_LINUX_SSH_PORT="$(pick_free_port "$preferred_port")"
-  if [[ "$CODEX_VM_LINUX_SSH_PORT" != "$preferred_port" ]]; then
-    log "Linux SSH forward port $preferred_port is busy; using $CODEX_VM_LINUX_SSH_PORT instead"
-  fi
+  CODEX_VM_LINUX_SSH_PORT="$preferred_port"
 
   while true; do
     if [[ "$auth_recreate_attempted" -eq 1 ]]; then
@@ -1475,6 +1917,17 @@ run_linux() {
     linux_auth_mode="$CODEX_VM_GUEST_AUTH_MODE"
     linux_auth_attempts="$CODEX_VM_GUEST_AUTH_ATTEMPTS"
 
+    # Ensure key auth works for file transfers (rsync/scp). Password-only ssh can
+    # work via SSH_ASKPASS, but rsync/scp need stdin and therefore require either
+    # key auth or sshpass.
+    if ! ensure_guest_key_authorized "$used_user" "$CODEX_VM_LINUX_SSH_PORT"; then
+      build_error="Linux guest key auth is not usable for ${used_user}@127.0.0.1:${CODEX_VM_LINUX_SSH_PORT}"
+      collect_linux_debug_artifacts "$build_error"
+      write_linux_run_manifest "failed" "auth" "$build_error" "$linux_auth_mode" "$linux_auth_attempts" \
+        "$configured_workspace" "$used_workspace" "$configured_user" "$used_user"
+      fatal "$build_error"
+    fi
+
     if ! run_guest_ssh "$used_user" "$CODEX_VM_LINUX_SSH_PORT" "mkdir -p '$used_workspace'" "$auth_candidates"; then
       build_error="Linux workspace create failed for $used_workspace"
       collect_linux_debug_artifacts "$build_error"
@@ -1491,11 +1944,39 @@ run_linux() {
       fatal "$build_error"
     fi
 
+    # The docker workflow writes into $HOME/.cache (WORKDIR). When the container
+    # runs as root (default), it leaves root-owned files in that directory which
+    # then cause "Permission denied" on subsequent runs when the guest user tries
+    # to `rm -rf` its own WORKDIR.
+    #
+    # Fix by cleaning/chowning as root via password SSH (root password is set by
+    # bootstrap for these guests).
+    run_guest_password_ssh_once "root" "$CODEX_VM_LINUX_SSH_PORT" "
+      set -eu
+      cache_dir='/home/${used_user}/.cache/codex-linux-port'
+      if [ -d \"\$cache_dir\" ]; then
+        rm -rf \"\$cache_dir/docker-output\" \"\$cache_dir/docker-output-linux\" \"\$cache_dir/docker-output-linux\" \"\$cache_dir/docker-output-win\" 2>/dev/null || true
+        chown -R '${used_user}:${used_user}' \"\$cache_dir\" 2>/dev/null || true
+      fi
+    " >/dev/null 2>&1 || true
+
+    # If the guest cannot reach Docker Hub, seed the `codex-builder` image from
+    # the host to avoid registry pulls inside the guest.
+    if ! guest_dockerhub_reachable "$used_user" "$CODEX_VM_LINUX_SSH_PORT" "$auth_candidates"; then
+      log "Guest cannot reach Docker Hub; attempting host->guest image seeding for codex-builder"
+      seed_guest_codex_builder_image "$used_user" "$CODEX_VM_LINUX_SSH_PORT" "$auth_candidates" || true
+    fi
+
     if ! run_guest_ssh "$used_user" "$CODEX_VM_LINUX_SSH_PORT" "
       mkdir -p '$used_workspace/.codex-vm-output'
       export CODEX_VM_GUEST_WORKDIR='$used_workspace'
       export CODEX_VM_OUTPUT_DIR='$used_workspace/.codex-vm-output'
       export CODEX_VM_RUN_ID='$RUN_ID'
+      export CODEX_VM_GUEST_PASSWORD='$CODEX_VM_LINUX_GUEST_PASSWORD'
+      export CODEX_SKIP_RUST_BUILD='$CODEX_VM_SKIP_RUST_BUILD'
+      export CODEX_SKIP_REBUILD_NATIVE='$CODEX_VM_SKIP_REBUILD_NATIVE'
+      export CODEX_PREBUILT_CLI_URL='$CODEX_VM_PREBUILT_CLI_URL'
+      export CODEX_PREBUILT_SANDBOX_URL='$CODEX_VM_PREBUILT_SANDBOX_URL'
       export CODEX_VM_CODEX_GIT_REF='$CODEX_VM_CODEX_GIT_REF'
       export CODEX_VM_CODEX_DMG_URL='$CODEX_VM_CODEX_DMG_URL'
       export CODEX_VM_ENABLE_LINUX_UI_POLISH='$CODEX_VM_ENABLE_LINUX_UI_POLISH'
@@ -1573,18 +2054,37 @@ copy_to_windows_guest() {
 }
 
 run_windows() {
+  acquire_vm_lock "$CODEX_VM_WINDOWS_VM_NAME"
   CODEX_VM_GUEST_PASSWORD="${CODEX_VM_GUEST_PASSWORD:-$CODEX_VM_WINDOWS_GUEST_PASSWORD}"
 
   local preferred_port="$CODEX_VM_WINDOWS_SSH_PORT"
-  CODEX_VM_WINDOWS_SSH_PORT="$(pick_free_port "$preferred_port")"
-  if [[ "$CODEX_VM_WINDOWS_SSH_PORT" != "$preferred_port" ]]; then
-    log "Windows SSH forward port $preferred_port is busy; using $CODEX_VM_WINDOWS_SSH_PORT instead"
+  CODEX_VM_WINDOWS_SSH_PORT="$preferred_port"
+
+  local windows_base_ova="$CODEX_VM_WINDOWS_BASE_OVA"
+  local windows_base_iso="$CODEX_VM_WINDOWS_BASE_ISO"
+
+  if [[ -z "$windows_base_iso" && -n "${CODEX_VM_WINDOWS_ISO_PATH:-}" ]]; then
+    windows_base_iso="$CODEX_VM_WINDOWS_ISO_PATH"
+    log "No CODEX_VM_WINDOWS_BASE_ISO configured; falling back to CODEX_VM_WINDOWS_ISO_PATH=$windows_base_iso"
   fi
 
-  if ! vm_prepare "$CODEX_VM_WINDOWS_VM_NAME" "$CODEX_VM_WINDOWS_BASE_OVA" "$CODEX_VM_WINDOWS_BASE_ISO" \
+  if ! vm_prepare "$CODEX_VM_WINDOWS_VM_NAME" "$windows_base_ova" "$windows_base_iso" \
     "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$CODEX_VM_WINDOWS_VM_OSTYPE" \
     "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_GUEST_PASSWORD" "$CODEX_VM_WINDOWS_GUEST_USER"; then
     fatal "Windows SSH login did not become ready on port $CODEX_VM_WINDOWS_SSH_PORT"
+  fi
+
+  if ! run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "command -v powershell >/dev/null 2>&1 || command -v pwsh >/dev/null 2>&1"; then
+    log "Windows probe failed on $CODEX_VM_WINDOWS_VM_NAME at port $CODEX_VM_WINDOWS_SSH_PORT; forcing VM recreation from Windows media"
+    if ! vm_prepare "$CODEX_VM_WINDOWS_VM_NAME" "$windows_base_ova" "$windows_base_iso" \
+      "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$CODEX_VM_WINDOWS_VM_OSTYPE" \
+      "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_GUEST_PASSWORD" "$CODEX_VM_WINDOWS_GUEST_USER" "recreate"; then
+      fatal "Windows VM recreation failed while attempting to restore a Windows-capable guest"
+    fi
+
+    if ! run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "command -v powershell >/dev/null 2>&1 || command -v pwsh >/dev/null 2>&1"; then
+      fatal "Windows probe still failing after recreation; verify CODX_VM_WINDOWS_BASE_ISO/base_ova points to a valid Windows image"
+    fi
   fi
 
   run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "New-Item -ItemType Directory -Path '$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output' -Force | Out-Null"
@@ -1594,7 +2094,11 @@ run_windows() {
     powershell -NoProfile -ExecutionPolicy Bypass -File '$CODEX_VM_WINDOWS_WORKSPACE/infra/vm/guest/windows-build.ps1' \
       -ProjectPath '$CODEX_VM_WINDOWS_WORKSPACE' -RunId '$RUN_ID' \
       -GitRef '$CODEX_VM_CODEX_GIT_REF' -DmgUrl '$CODEX_VM_CODEX_DMG_URL' \
-      -OutputDir '$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output' -EnableLinuxUiPolish '$CODEX_VM_ENABLE_LINUX_UI_POLISH'
+      -OutputDir '$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output' \
+      -EnableLinuxUiPolish '$CODEX_VM_ENABLE_LINUX_UI_POLISH' \
+      -SkipRustBuild '$CODEX_VM_SKIP_RUST_BUILD' \
+      -SkipRebuildNative '$CODEX_VM_SKIP_REBUILD_NATIVE' \
+      -PrebuiltCliUrl '$CODEX_VM_PREBUILT_WIN_CLI_URL'
   "
 
   local out_dir="$ARTIFACT_ROOT/$RUN_ID/windows"
@@ -1602,6 +2106,8 @@ run_windows() {
   run_guest_scp_from "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output/Codex-Setup-Windows-x64.exe" "$out_dir/Codex-Setup-Windows-x64.exe"
   run_guest_scp_from "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output/manifest.json" "$out_dir/manifest.json"
 }
+
+ensure_prebuilt_urls
 
 case "$ACTION" in
   check)

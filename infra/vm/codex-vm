@@ -179,6 +179,10 @@ export CODEX_VM_SOURCE_DIR='$(printf '%s' "$remote_source_dir" | shell_escape_si
 export CODEX_VM_HOST_KEY='$(printf '%s' "$CODEX_VM_HOST_KEY" | shell_escape_single)'
 export CODEX_VM_GUEST_KEY='$(printf '%s' "${CODEX_VM_GUEST_KEY:-$CODEX_VM_HOST_KEY}" | shell_escape_single)'
 export CODEX_VM_LIFECYCLE_MODE='$(printf '%s' "$CODEX_VM_LIFECYCLE_MODE" | shell_escape_single)'
+export CODEX_VM_SKIP_RUST_BUILD='$(printf '%s' "${CODEX_VM_SKIP_RUST_BUILD:-1}" | shell_escape_single)'
+export CODEX_VM_PREBUILT_CLI_URL='$(printf '%s' "$CODEX_VM_PREBUILT_CLI_URL" | shell_escape_single)'
+export CODEX_VM_PREBUILT_SANDBOX_URL='$(printf '%s' "$CODEX_VM_PREBUILT_SANDBOX_URL" | shell_escape_single)'
+export CODEX_VM_PREBUILT_WIN_CLI_URL='$(printf '%s' "$CODEX_VM_PREBUILT_WIN_CLI_URL" | shell_escape_single)'
 export CODEX_VM_CODEX_DMG_URL='$(printf '%s' "$CODEX_VM_CODEX_DMG_URL" | shell_escape_single)'
 export CODEX_VM_CODEX_GIT_REF='$(printf '%s' "$CODEX_VM_CODEX_GIT_REF" | shell_escape_single)'
 export CODEX_VM_ENABLE_LINUX_UI_POLISH='$(printf '%s' "$CODEX_VM_ENABLE_LINUX_UI_POLISH" | shell_escape_single)'
@@ -225,8 +229,11 @@ EOF_ENV
 
   log "Invoking remote build-agent: action=$action"
   local remote_rc=0
-  if ! ssh_host "source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}"; then
-    remote_rc=$?
+  set +e
+  ssh_host "source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}"
+  remote_rc=$?
+  set -e
+  if ((remote_rc != 0)); then
     log "Remote build-agent exited with code $remote_rc; attempting to fetch debug artifacts before failing."
   fi
 
@@ -294,6 +301,11 @@ load_setting lifecycle_mode CODEX_VM_LIFECYCLE_MODE reuse
 load_setting codex_dmg_url CODEX_VM_CODEX_DMG_URL https://persistent.oaistatic.com/codex-app-prod/Codex.dmg
 load_setting codex_git_ref CODEX_VM_CODEX_GIT_REF rust-v0.102.0-alpha.5
 load_setting enable_linux_ui_polish CODEX_VM_ENABLE_LINUX_UI_POLISH 1
+load_setting skip_rust_build CODEX_VM_SKIP_RUST_BUILD 1
+load_setting skip_rebuild_native CODEX_VM_SKIP_REBUILD_NATIVE 1
+load_setting prebuilt_cli_url CODEX_VM_PREBUILT_CLI_URL
+load_setting prebuilt_sandbox_url CODEX_VM_PREBUILT_SANDBOX_URL
+load_setting prebuilt_win_cli_url CODEX_VM_PREBUILT_WIN_CLI_URL
 load_setting linux_iso_url CODEX_VM_LINUX_ISO_URL https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso
 load_setting windows_iso_path CODEX_VM_WINDOWS_ISO_PATH
 load_setting linux_vm_name CODEX_VM_LINUX_VM_NAME codex-linux-builder

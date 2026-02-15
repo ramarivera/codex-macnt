@@ -30,6 +30,11 @@ retry_recreate_on_auth_failure = "1"
 codex_dmg_url = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 codex_git_ref = "rust-v0.102.0-alpha.5"
 enable_linux_ui_polish = "1"
+skip_rust_build = "1"
+skip_rebuild_native = "1"
+prebuilt_cli_url = ""
+prebuilt_sandbox_url = ""
+prebuilt_win_cli_url = ""
 linux_iso_url = "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
 
 # Optional: path to a local copy of the Windows ISO on the remote host

@@ -2,13 +2,15 @@
 
 [tools]
 node = "22"
-jq = "latest"
+jq = "1.7.1"
 
 [env]
 WORKDIR = "{{env.HOME}}/.cache/codex-linux-port"
 CODEX_DMG_URL = "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
 ENABLE_LINUX_UI_POLISH = "1"
-CODEX_GIT_REF = "rust-v0.102.0-alpha.5"
+CODEX_GIT_REF = "rust-v0.102.0-alpha.7"
+CODEX_SKIP_RUST_BUILD = "1"
+CODEX_PREBUILT_CLI_URL = "https://github.com/openai/codex/releases/download/rust-v0.102.0-alpha.7/codex-x86_64-unknown-linux-gnu.tar.gz"
 
 [tasks."codex:vm:check"]
 description = "Run remote VM preflight checks"
@@ -32,7 +34,14 @@ run = "bash infra/vm/codex-vm release"
 
 [tasks."codex:docker-build"]
 description = "Build codex-builder Docker image"
-run = "docker build -t codex-builder {{config_root}}"
+run = """
+set -euo pipefail
+if docker image inspect codex-builder >/dev/null 2>&1; then
+  echo "codex-builder already present; skipping docker build"
+  exit 0
+fi
+docker build -t codex-builder {{config_root}}
+"""
 
 [tasks."codex:docker-run"]
 description = "Run extraction and Rust build in container"
@@ -40,8 +49,26 @@ depends = ["codex:docker-build"]
 run = """
 set -euo pipefail
 docker_output_dir="{{env.WORKDIR}}/docker-output"
-rm -rf "$docker_output_dir"
-mkdir -p "$docker_output_dir"
+
+# The container runs as root (needs SYS_ADMIN) and writes into the bind mount.
+# Without an explicit chown, that leaves root-owned files in WORKDIR which then
+# breaks subsequent runs when the host user tries to `rm -rf`.
+host_uid="$(id -u)"
+host_gid="$(id -g)"
+
+# Always (re)create the output directory from inside a container so we can
+# reliably delete root-owned leftovers without sudo on the host.
+docker run --rm \
+  --entrypoint bash \
+  -e HOST_UID="$host_uid" \
+  -e HOST_GID="$host_gid" \
+  -v "{{env.WORKDIR}}:/workdir" \
+  codex-builder -c '
+set -euo pipefail
+rm -rf /workdir/docker-output
+mkdir -p /workdir/docker-output
+chown -R "$HOST_UID:$HOST_GID" /workdir/docker-output
+'
 
 if [ -f "{{config_root}}/ui-design-overrides.json" ]; then
   cp "{{config_root}}/ui-design-overrides.json" "$docker_output_dir/ui-design-overrides.json"
@@ -51,8 +78,13 @@ docker run --rm \
   --entrypoint bash \
   --cap-add SYS_ADMIN \
   --security-opt apparmor:unconfined \
+  -e HOST_UID="$host_uid" \
+  -e HOST_GID="$host_gid" \
   -e WORKDIR=/output/work \
   -e CODEX_DMG_URL="{{env.CODEX_DMG_URL}}" \
+  -e CODEX_SKIP_RUST_BUILD="{{env.CODEX_SKIP_RUST_BUILD}}" \
+  -e CODEX_PREBUILT_CLI_URL="{{env.CODEX_PREBUILT_CLI_URL}}" \
+  -e CODEX_PREBUILT_SANDBOX_URL="{{env.CODEX_PREBUILT_SANDBOX_URL}}" \
   -e ENABLE_LINUX_UI_POLISH="{{env.ENABLE_LINUX_UI_POLISH}}" \
   -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
   -e UI_OVERRIDES_FILE=/output/ui-design-overrides.json \
@@ -61,6 +93,11 @@ docker run --rm \
 set -euo pipefail
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
+SKIP_RUST_BUILD="${CODEX_SKIP_RUST_BUILD:-0}"
+PREBUILT_WIN_CLI_URL="${CODEX_PREBUILT_WIN_CLI_URL:-}"
+SKIP_RUST_BUILD="${CODEX_SKIP_RUST_BUILD:-0}"
+PREBUILT_CLI_URL="${CODEX_PREBUILT_CLI_URL:-}"
+PREBUILT_SANDBOX_URL="${CODEX_PREBUILT_SANDBOX_URL:-}"
 
 if [ ! -f Codex.dmg ]; then
   if command -v curl >/dev/null 2>&1; then
@@ -95,52 +132,114 @@ npm install --prefix .npm-local "$ASAR_PKG" >/dev/null
 .npm-local/node_modules/.bin/asar extract "$ASAR_PATH" app_unpacked/
 
 rm -rf codex-src
-git clone https://github.com/openai/codex.git codex-src >/dev/null
-
-cd codex-src
-if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
-  git fetch --tags --force >/dev/null 2>&1 || true
-  SELECTED_TAG=""
-  for tag in $(git tag --sort=-v:refname | head -n 200); do
-    git checkout --detach "$tag" >/dev/null 2>&1 || continue
-    if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
-      SELECTED_TAG="$tag"
-      break
-    fi
-  done
-  if [ -z "$SELECTED_TAG" ]; then
-    git checkout --detach HEAD >/dev/null 2>&1
-    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || {
-      echo "No buildable codex ref found" >&2
-      exit 1
-    }
-  fi
-else
-  git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
-  git checkout --detach FETCH_HEAD >/dev/null
-  if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
-    echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
-    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps
+if [ "$SKIP_RUST_BUILD" = "1" ]; then
+  if [ -z "$PREBUILT_CLI_URL" ]; then
+    echo "CODEX_SKIP_RUST_BUILD is set but CODEX_PREBUILT_CLI_URL is missing" >&2
     exit 1
   fi
-fi
 
-cd codex-rs
-cargo build --release --bin codex
-cargo build --release --bin codex-linux-sandbox || true
+  rm -rf "$WORKDIR/prebuilt"
+  mkdir -p "$WORKDIR/prebuilt"
+  PREBUILT_CLI_ARCHIVE="$WORKDIR/prebuilt/codex.prebuilt"
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --output "$PREBUILT_CLI_ARCHIVE" "$PREBUILT_CLI_URL"
+  else
+    wget -O "$PREBUILT_CLI_ARCHIVE" "$PREBUILT_CLI_URL"
+  fi
+
+PREBUILT_CLI_PATH=""
+  case "$PREBUILT_CLI_URL" in
+    *.tar.gz|*.tgz)
+      tar -xzf "$PREBUILT_CLI_ARCHIVE" -C "$WORKDIR/prebuilt"
+      PREBUILT_CLI_PATH="$(find "$WORKDIR/prebuilt" -maxdepth 1 -type f ! -name 'codex.prebuilt' | head -n 1)"
+      ;;
+    *.zst)
+      if ! command -v zstd >/dev/null 2>&1; then
+        echo "zstd is required to extract prebuilt CLI from $PREBUILT_CLI_URL" >&2
+        exit 1
+      fi
+      unzstd -c "$PREBUILT_CLI_ARCHIVE" > "$WORKDIR/prebuilt/codex-x86_64-unknown-linux-gnu"
+      PREBUILT_CLI_PATH="$WORKDIR/prebuilt/codex-x86_64-unknown-linux-gnu"
+      ;;
+    *)
+      PREBUILT_CLI_PATH="$PREBUILT_CLI_ARCHIVE"
+      ;;
+  esac
+
+  if [ -z "$PREBUILT_CLI_PATH" ] || [ ! -f "$PREBUILT_CLI_PATH" ]; then
+    echo "Could not extract a prebuilt codex CLI binary from $PREBUILT_CLI_URL" >&2
+    exit 1
+  fi
+
+  cp "$PREBUILT_CLI_PATH" "$WORKDIR/prebuilt/codex"
+  chmod +x "$WORKDIR/prebuilt/codex"
+
+  if [ -n "$PREBUILT_SANDBOX_URL" ]; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -L --fail --output "$WORKDIR/prebuilt/codex-linux-sandbox" "$PREBUILT_SANDBOX_URL"
+    else
+      wget -O "$WORKDIR/prebuilt/codex-linux-sandbox" "$PREBUILT_SANDBOX_URL"
+    fi
+    chmod +x "$WORKDIR/prebuilt/codex-linux-sandbox"
+  fi
+else
+  git clone https://github.com/openai/codex.git codex-src >/dev/null
+
+  cd codex-src
+  if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
+    git fetch --tags --force >/dev/null 2>&1 || true
+    SELECTED_TAG=""
+    for tag in $(git tag --sort=-v:refname | head -n 200); do
+      git checkout --detach "$tag" >/dev/null 2>&1 || continue
+      if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+        SELECTED_TAG="$tag"
+        break
+      fi
+    done
+    if [ -z "$SELECTED_TAG" ]; then
+      git checkout --detach HEAD >/dev/null 2>&1
+      cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || {
+        echo "No buildable codex ref found" >&2
+        exit 1
+      }
+    fi
+  else
+    git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
+    git checkout --detach FETCH_HEAD >/dev/null
+    if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+      echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
+      cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps
+      exit 1
+    fi
+  fi
+
+  cd codex-rs
+  cargo build --release --bin codex
+  cargo build --release --bin codex-linux-sandbox || true
+fi
 
 cd "$WORKDIR/app_unpacked"
 rm -f native/sparkle.node
 rm -rf node_modules/electron-liquid-glass
 
 mkdir -p resources resources/bin
-cp "$WORKDIR/codex-src/codex-rs/target/release/codex" resources/codex
-chmod +x resources/codex
-cp resources/codex resources/bin/codex
-chmod +x resources/bin/codex
+if [ "$SKIP_RUST_BUILD" = "1" ]; then
+  cp "$WORKDIR/prebuilt/codex" resources/codex
+  chmod +x resources/codex
+  cp resources/codex resources/bin/codex
+  chmod +x resources/bin/codex
+else
+  cp "$WORKDIR/codex-src/codex-rs/target/release/codex" resources/codex
+  chmod +x resources/codex
+  cp resources/codex resources/bin/codex
+  chmod +x resources/bin/codex
+fi
 
-if [ -f "$WORKDIR/codex-src/codex-rs/target/release/codex-linux-sandbox" ]; then
+if [ "$SKIP_RUST_BUILD" != "1" ] && [ -f "$WORKDIR/codex-src/codex-rs/target/release/codex-linux-sandbox" ]; then
   cp "$WORKDIR/codex-src/codex-rs/target/release/codex-linux-sandbox" resources/
+  chmod +x resources/codex-linux-sandbox
+elif [ "$SKIP_RUST_BUILD" = "1" ] && [ -f "$WORKDIR/prebuilt/codex-linux-sandbox" ]; then
+  cp "$WORKDIR/prebuilt/codex-linux-sandbox" resources/
   chmod +x resources/codex-linux-sandbox
 fi
 
@@ -335,6 +434,9 @@ echo "Electron not installed. Run CLI: ${CODEX_CLI_PATH}" >&2
 exit 1
 LAUNCHER
 chmod +x codex-linux.sh
+
+# Ensure bind-mounted outputs are writable by the invoking user on the host.
+chown -R "${HOST_UID}:${HOST_GID}" /output 2>/dev/null || true
 '
 """
 
@@ -362,6 +464,11 @@ description = "Rebuild native modules against host Electron ABI"
 depends = ["codex:prepare-bundle"]
 run = """
 set -euo pipefail
+if [ "${CODEX_SKIP_REBUILD_NATIVE:-0}" = "1" ]; then
+  echo "Skipping native module rebuild (CODEX_SKIP_REBUILD_NATIVE=1)"
+  exit 0
+fi
+
 app_dir="{{env.WORKDIR}}/docker-output/codex-linux"
 native_build_dir="{{env.WORKDIR}}/native-build-host"
 
@@ -1285,12 +1392,16 @@ docker run --rm \
   --security-opt apparmor:unconfined \
   -e WORKDIR=/output/work \
   -e CODEX_DMG_URL="{{env.CODEX_DMG_URL}}" \
+  -e CODEX_SKIP_RUST_BUILD="{{env.CODEX_SKIP_RUST_BUILD}}" \
+  -e CODEX_PREBUILT_WIN_CLI_URL="{{env.CODEX_PREBUILT_WIN_CLI_URL}}" \
   -e ENABLE_LINUX_UI_POLISH="{{env.ENABLE_LINUX_UI_POLISH}}" \
   -e CODEX_GIT_REF="{{env.CODEX_GIT_REF}}" \
   -e UI_OVERRIDES_FILE=/output/ui-design-overrides.json \
   -v "$docker_output_dir:/output" \
   codex-windows-builder -c '
 set -euo pipefail
+SKIP_RUST_BUILD="${SKIP_RUST_BUILD:-${CODEX_SKIP_RUST_BUILD:-0}}"
+PREBUILT_WIN_CLI_URL="${PREBUILT_WIN_CLI_URL:-${CODEX_PREBUILT_WIN_CLI_URL:-}}"
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
@@ -1327,41 +1438,57 @@ npm init -y --prefix .npm-local >/dev/null 2>&1 || true
 npm install --prefix .npm-local "$ASAR_PKG" >/dev/null
 .npm-local/node_modules/.bin/asar extract "$ASAR_PATH" app_unpacked/
 
-# ── Clone & build Rust CLI for Windows ──
+# ── Build or download Rust CLI for Windows ──
 rm -rf codex-src
-git clone https://github.com/openai/codex.git codex-src >/dev/null
-
-cd codex-src
-if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
-  git fetch --tags --force >/dev/null 2>&1 || true
-  SELECTED_TAG=""
-  for tag in $(git tag --sort=-v:refname | head -n 200); do
-    git checkout --detach "$tag" >/dev/null 2>&1 || continue
-    if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
-      SELECTED_TAG="$tag"
-      break
-    fi
-  done
-  if [ -z "$SELECTED_TAG" ]; then
-    git checkout --detach HEAD >/dev/null 2>&1
-    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || {
-      echo "No buildable codex ref found" >&2
-      exit 1
-    }
-  fi
-else
-  git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
-  git checkout --detach FETCH_HEAD >/dev/null
-  if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
-    echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
-    cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps
+if [ "$SKIP_RUST_BUILD" = "1" ]; then
+  if [ -z "$PREBUILT_WIN_CLI_URL" ]; then
+    echo "CODEX_SKIP_RUST_BUILD is set but CODEX_PREBUILT_WIN_CLI_URL is missing" >&2
     exit 1
   fi
-fi
 
-cd codex-rs
-echo "Building codex CLI for x86_64-pc-windows-gnu..."
-cargo build --release --target x86_64-pc-windows-gnu --bin codex
+  rm -rf "$WORKDIR/prebuilt"
+  mkdir -p "$WORKDIR/prebuilt"
+  if command -v curl >/dev/null 2>&1; then
+    curl -L --fail --output "$WORKDIR/prebuilt/codex.exe" "$PREBUILT_WIN_CLI_URL"
+  else
+    wget -O "$WORKDIR/prebuilt/codex.exe" "$PREBUILT_WIN_CLI_URL"
+  fi
+  chmod +x "$WORKDIR/prebuilt/codex.exe"
+else
+  git clone https://github.com/openai/codex.git codex-src >/dev/null
+
+  cd codex-src
+  if [ "$CODEX_GIT_REF" = "latest-tag" ]; then
+    git fetch --tags --force >/dev/null 2>&1 || true
+    SELECTED_TAG=""
+    for tag in $(git tag --sort=-v:refname | head -n 200); do
+      git checkout --detach "$tag" >/dev/null 2>&1 || continue
+      if cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+        SELECTED_TAG="$tag"
+        break
+      fi
+    done
+    if [ -z "$SELECTED_TAG" ]; then
+      git checkout --detach HEAD >/dev/null 2>&1
+      cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1 || {
+        echo "No buildable codex ref found" >&2
+        exit 1
+      }
+    fi
+  else
+    git fetch --depth 1 origin "$CODEX_GIT_REF" >/dev/null
+    git checkout --detach FETCH_HEAD >/dev/null
+    if ! cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps >/dev/null 2>&1; then
+      echo "Selected ref $CODEX_GIT_REF is not buildable" >&2
+      cargo metadata --manifest-path codex-rs/Cargo.toml --no-deps
+      exit 1
+    fi
+  fi
+
+  cd codex-rs
+  echo "Building codex CLI for x86_64-pc-windows-gnu..."
+  cargo build --release --target x86_64-pc-windows-gnu --bin codex
+fi
 
 # ── Assemble Windows bundle ──
 cd "$WORKDIR/app_unpacked"
@@ -1369,7 +1496,11 @@ rm -f native/sparkle.node
 rm -rf node_modules/electron-liquid-glass
 
 mkdir -p resources resources/bin
-cp "$WORKDIR/codex-src/codex-rs/target/x86_64-pc-windows-gnu/release/codex.exe" resources/codex.exe
+if [ "$SKIP_RUST_BUILD" = "1" ]; then
+  cp "$WORKDIR/prebuilt/codex.exe" resources/codex.exe
+else
+  cp "$WORKDIR/codex-src/codex-rs/target/x86_64-pc-windows-gnu/release/codex.exe" resources/codex.exe
+fi
 chmod +x resources/codex.exe
 cp resources/codex.exe resources/bin/codex.exe
 
@@ -1536,3 +1667,5 @@ run = "rm -rf {{env.WORKDIR}}/docker-output-windows"
 
 [settings]
 jobs = 4
+unix_default_file_shell_args = "bash"
+unix_default_inline_shell_args = "bash -lc"

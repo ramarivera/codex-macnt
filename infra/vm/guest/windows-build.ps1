@@ -4,7 +4,10 @@ param(
     [Parameter(Mandatory = $true)] [string] $GitRef,
     [Parameter(Mandatory = $true)] [string] $DmgUrl,
     [string] $OutputDir = "/c/codex-vm-output",
-    [string] $EnableLinuxUiPolish = "1"
+    [string] $EnableLinuxUiPolish = "1",
+    [bool] $SkipRustBuild = $false,
+    [bool] $SkipRebuildNative = $false,
+    [string] $PrebuiltCliUrl = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,14 +47,18 @@ New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 
 Set-Location $ProjectPath
 
-Ensure-Command git "Install Git for Windows or Git via package manager."
-Ensure-Command cargo "Install rustup and toolchains with the MSVC/Windows target."
+if (-not $SkipRustBuild) {
+    Ensure-Command git "Install Git for Windows or Git via package manager."
+    Ensure-Command cargo "Install rustup and toolchains with the MSVC/Windows target."
+}
 Ensure-Command node "Install Node.js before running this script."
 Ensure-Command npm "Install npm with Node.js before running this script."
 
 $env:CODEX_GIT_REF = $GitRef
 $env:CODEX_DMG_URL = $DmgUrl
 $env:ENABLE_LINUX_UI_POLISH = $EnableLinuxUiPolish
+$env:CODEX_SKIP_RUST_BUILD = if ($SkipRustBuild) { "1" } else { "0" }
+$env:CODEX_SKIP_REBUILD_NATIVE = if ($SkipRebuildNative) { "1" } else { "0" }
 
 $installerWorkdir = Join-Path $ProjectPath '.codex-vm-windows'
 New-Item -ItemType Directory -Path $installerWorkdir -Force | Out-Null
@@ -104,74 +111,95 @@ if (Test-Path $manifestPath) {
 }
 
 Set-Location $ProjectPath
-if (Test-Path .git) {
+if ((-not $SkipRustBuild) -and (Test-Path .git)) {
     git config --global --add safe.directory "$ProjectPath" | Out-Null
 }
 
-if (Test-Path codex-src) {
-    Remove-Item codex-src -Recurse -Force
-}
-
-git clone https://github.com/openai/codex.git codex-src
-Set-Location codex-src
-
-if ($GitRef -ne 'latest-tag') {
-    git fetch --depth 1 origin $GitRef
-    git checkout FETCH_HEAD
-} else {
-    git fetch --tags --force
-    $tag = (git tag --sort=-v:refname | Select-Object -First 1)
-    if (-not $tag) {
-        throw "No tags found for latest-tag resolution"
+if ($SkipRustBuild) {
+    if (-not $PrebuiltCliUrl) {
+        throw "SkipRustBuild is enabled but PrebuiltCliUrl is empty."
     }
-    git checkout $tag
-}
 
-Set-Location codex-rs
-Write-Step "Building codex.exe with Rust toolchain"
-cargo build --release --bin codex
-if (-not (Test-Path target/release/codex.exe)) {
-    throw "codex.exe build failed"
-}
+    $cliDownloadPath = Join-Path $installerWorkdir 'codex-prebuilt.exe'
+    Write-Step "Downloading prebuilt codex.exe from $PrebuiltCliUrl"
+    Invoke-WebRequest -Uri $PrebuiltCliUrl -OutFile $cliDownloadPath
 
-$cliSrc = Join-Path (Get-Location) 'target/release/codex.exe'
-$cliDstDir = Join-Path $installerWorkdir 'app_unpacked/resources'
-New-Item -ItemType Directory -Path $cliDstDir -Force | Out-Null
-New-Item -ItemType Directory -Path (Join-Path $cliDstDir 'bin') -Force | Out-Null
-$cliDst = Join-Path $cliDstDir 'codex.exe'
-Copy-Item $cliSrc $cliDst -Force
-Copy-Item $cliDst (Join-Path $cliDstDir 'bin/codex.exe') -Force
+    $cliDstDir = Join-Path $installerWorkdir 'app_unpacked/resources'
+    New-Item -ItemType Directory -Path $cliDstDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $cliDstDir 'bin') -Force | Out-Null
+    $cliDst = Join-Path $cliDstDir 'codex.exe'
+    Copy-Item $cliDownloadPath $cliDst -Force
+    Copy-Item $cliDownloadPath (Join-Path $cliDstDir 'bin/codex.exe') -Force
+} else {
+    if (Test-Path codex-src) {
+        Remove-Item codex-src -Recurse -Force
+    }
+
+    git clone https://github.com/openai/codex.git codex-src
+    Set-Location codex-src
+
+    if ($GitRef -ne 'latest-tag') {
+        git fetch --depth 1 origin $GitRef
+        git checkout FETCH_HEAD
+    } else {
+        git fetch --tags --force
+        $tag = (git tag --sort=-v:refname | Select-Object -First 1)
+        if (-not $tag) {
+            throw "No tags found for latest-tag resolution"
+        }
+        git checkout $tag
+    }
+
+    Set-Location codex-rs
+    Write-Step "Building codex.exe with Rust toolchain"
+    cargo build --release --bin codex
+    if (-not (Test-Path target/release/codex.exe)) {
+        throw "codex.exe build failed"
+    }
+
+    $cliSrc = Join-Path (Get-Location) 'target/release/codex.exe'
+    $cliDstDir = Join-Path $installerWorkdir 'app_unpacked/resources'
+    New-Item -ItemType Directory -Path $cliDstDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $cliDstDir 'bin') -Force | Out-Null
+    $cliDst = Join-Path $cliDstDir 'codex.exe'
+    Copy-Item $cliSrc $cliDst -Force
+    Copy-Item $cliDst (Join-Path $cliDstDir 'bin/codex.exe') -Force
+}
 
 Set-Location $installerWorkdir
 
 # Rebuild native modules for Windows/ Electron ABI
-$packagePath = Join-Path $installerWorkdir 'app_unpacked/package.json'
-$appNodeDeps = Get-Content $packagePath -Raw | ConvertFrom-Json
-$targetElectron = ($appNodeDeps.devDependencies.electron -replace '^\\^', '')
+if (-not $SkipRebuildNative) {
+    $packagePath = Join-Path $installerWorkdir 'app_unpacked/package.json'
+    $appNodeDeps = Get-Content $packagePath -Raw | ConvertFrom-Json
+    $targetElectron = ($appNodeDeps.devDependencies.electron -replace '^\\^', '')
 
-if ($targetElectron) {
-    Write-Step "Rebuilding native modules for electron $targetElectron"
+    if ($targetElectron) {
+        Write-Step "Rebuilding native modules for electron $targetElectron"
 
-    $sqliteVer = (Get-Content (Join-Path $installerWorkdir 'app_unpacked/node_modules/better-sqlite3/package.json') -Raw | ConvertFrom-Json).version
-    $ptyVer = (Get-Content (Join-Path $installerWorkdir 'app_unpacked/node_modules/node-pty/package.json') -Raw | ConvertFrom-Json).version
+        $sqliteVer = (Get-Content (Join-Path $installerWorkdir 'app_unpacked/node_modules/better-sqlite3/package.json') -Raw | ConvertFrom-Json).version
+        $ptyVer = (Get-Content (Join-Path $installerWorkdir 'app_unpacked/node_modules/node-pty/package.json') -Raw | ConvertFrom-Json).version
 
-    $nativeBuild = Join-Path $installerWorkdir '_native_src'
-    if (Test-Path $nativeBuild) { Remove-Item $nativeBuild -Recurse -Force }
-    New-Item -ItemType Directory -Path $nativeBuild -Force | Out-Null
+        $nativeBuild = Join-Path $installerWorkdir '_native_src'
+        if (Test-Path $nativeBuild) { Remove-Item $nativeBuild -Recurse -Force }
+        New-Item -ItemType Directory -Path $nativeBuild -Force | Out-Null
 
-    Push-Location $nativeBuild
-    npm init -y | Out-Null
-    npm install "better-sqlite3@$sqliteVer" "node-pty@$ptyVer" --ignore-scripts | Out-Null
-    Pop-Location
+        Push-Location $nativeBuild
+        npm init -y | Out-Null
+        npm install "better-sqlite3@$sqliteVer" "node-pty@$ptyVer" --ignore-scripts | Out-Null
+        Pop-Location
 
-    Remove-Item app_unpacked/node_modules/better-sqlite3 -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item app_unpacked/node_modules/node-pty -Recurse -Force -ErrorAction SilentlyContinue
-    Copy-Item "$nativeBuild/node_modules/better-sqlite3" -Destination "$installerWorkdir/app_unpacked/node_modules" -Recurse -Force
-    Copy-Item "$nativeBuild/node_modules/node-pty" -Destination "$installerWorkdir/app_unpacked/node_modules" -Recurse -Force
+        Remove-Item app_unpacked/node_modules/better-sqlite3 -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item app_unpacked/node_modules/node-pty -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item "$nativeBuild/node_modules/better-sqlite3" -Destination "$installerWorkdir/app_unpacked/node_modules" -Recurse -Force
+        Copy-Item "$nativeBuild/node_modules/node-pty" -Destination "$installerWorkdir/app_unpacked/node_modules" -Recurse -Force
 
-    npm install -g electron-rebuild | Out-Null
-    & electron-rebuild --version | Out-Null
-    & electron-rebuild --version-app "$targetElectron" --arch x64 --module-dir "$installerWorkdir/app_unpacked" --only better-sqlite3,node-pty --force | Out-Null
+        npm install -g electron-rebuild | Out-Null
+        & electron-rebuild --version | Out-Null
+        & electron-rebuild --version-app "$targetElectron" --arch x64 --module-dir "$installerWorkdir/app_unpacked" --only better-sqlite3,node-pty --force | Out-Null
+    }
+} else {
+    Write-Step "Skipping native module rebuild (SkipRebuildNative=true)"
 }
 
 $electronDir = Join-Path $installerWorkdir 'electron-dist'
@@ -248,4 +276,3 @@ if (Test-Path (Join-Path $OutputDir 'Codex-Setup-Windows-x64.exe')) {
 }
 
 throw "Windows build did not produce installer in $OutputDir"
-
