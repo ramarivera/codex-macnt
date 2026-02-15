@@ -92,7 +92,15 @@ jobs:
 
       - name: Extract and convert Codex icon
         run: |
-          ICNS_PATH=$(find extracted -name "*.icns" -type f | head -1)
+          # DMG can contain multiple .icns files (frameworks, helper apps, etc).
+          # Prefer the main app icon from the .app bundle resources.
+          ICNS_PATH="$(find extracted -path '*Contents/Resources/*.icns' -type f 2>/dev/null | grep -iE '(codex|appicon)' | head -1 || true)"
+          if [ -z "$ICNS_PATH" ]; then
+            ICNS_PATH="$(find extracted -path '*Contents/Resources/*.icns' -type f -print0 2>/dev/null | xargs -0 ls -S 2>/dev/null | head -1 || true)"
+          fi
+          if [ -z "$ICNS_PATH" ]; then
+            ICNS_PATH="$(find extracted -name '*.icns' -type f 2>/dev/null | head -1 || true)"
+          fi
           if [ -n "$ICNS_PATH" ]; then
             echo "Found icon: $ICNS_PATH"
             cp "$ICNS_PATH" codex-icon.icns
