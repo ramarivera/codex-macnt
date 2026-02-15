@@ -52,7 +52,9 @@ jobs:
           mkdir -p cli-binaries _cli_tmp/linux _cli_tmp/win
 
           linux_asset="codex-x86_64-unknown-linux-gnu.tar.gz"
-          win_asset="codex-x86_64-pc-windows-msvc.exe.zip"
+          # Use the raw .exe asset (not the .zip wrapper) so the release doesn't
+          # appear to "ship a zip with an exe".
+          win_asset="codex-x86_64-pc-windows-msvc.exe"
 
           curl -sL --fail -o "_cli_tmp/$linux_asset" \
             "https://github.com/openai/codex/releases/download/$cli_tag/$linux_asset"
@@ -62,8 +64,7 @@ jobs:
 
           curl -sL --fail -o "_cli_tmp/$win_asset" \
             "https://github.com/openai/codex/releases/download/$cli_tag/$win_asset"
-          unzip -q "_cli_tmp/$win_asset" -d _cli_tmp/win
-          mv _cli_tmp/win/codex-x86_64-pc-windows-msvc.exe cli-binaries/codex.exe
+          mv "_cli_tmp/$win_asset" cli-binaries/codex.exe
 
           echo "✅ Downloaded CLI binaries:"
           file cli-binaries/codex
