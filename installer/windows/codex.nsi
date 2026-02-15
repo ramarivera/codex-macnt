@@ -67,7 +67,10 @@ BrandingText "${APP_NAME} Unofficial Installer"
 ; ============================================================
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "${SOURCE_DIR}/*.*"
+  ; SOURCE_DIR is passed as a Windows path (e.g. D:\...\codex-windows-x64). NSIS
+  ; does not reliably handle forward slashes in File wildcards, so keep it
+  ; backslash-based and include extensionless files too.
+  File /r "${SOURCE_DIR}\\*"
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"

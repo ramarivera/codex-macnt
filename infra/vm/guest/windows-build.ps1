@@ -315,7 +315,7 @@ $appVer = (Get-Content $packagePathForVer -Raw | ConvertFrom-Json).version
 $manifest = Join-Path $OutputDir "manifest.json"
 
 Set-Location $distDir
-$nsisCmd = "makensis -DAPP_VERSION=$appVer -DSOURCE_DIR=./ ${iconArg} codex.nsi"
+$nsisCmd = "makensis -DAPP_VERSION=$appVer -DSOURCE_DIR=. ${iconArg} codex.nsi"
 Write-Step "Running NSIS: $nsisCmd"
 Invoke-Expression $nsisCmd
 
