@@ -1,13 +1,11 @@
+dist/
+versions.json
 *.AppImage
 *.zip
+.codex/
+.cleanup-stash/
 .ui-inspect/
 ui-design-overrides.candidate.json
-
-# Track the cross-compiled Windows CLI binary
-!dist/windows-x64/codex.exe
-
-# VM orchestration runtime artifacts
-infra/vm/artifacts/
 
 # Local download/extract scratch
 .tmp-codex-assets/
