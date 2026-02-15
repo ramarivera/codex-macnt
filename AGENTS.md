@@ -91,10 +91,7 @@ This repository ports OpenAI's Codex (macOS-only desktop app) to Linux by:
 
 ## Docker Notes
 
-If using Docker:
-- Build: `docker-compose build --no-cache`
-- Run: `docker-compose up`
-- Output: `./output/codex`
+Local builds use Docker via `mise` (see `mise.toml`).
 
 **Do not use privileged mode if possible.** Use SYS_ADMIN cap instead for unprivileged DMG operations.
 
@@ -112,9 +109,4 @@ Node.js + npm
 
 ## Reverse Engineering Notes
 
-See `reverse_analysis/ANALYSIS.md` for full technical details.
-
-Key findings:
-- Codex is Electron + Rust CLI architecture
-- Rust CLI already supports Linux (Landlock+seccomp sandboxing)
-- Only blocker was macOS-only release builds
+Keep reverse-engineering notes out of this repo unless they are safe to publish.

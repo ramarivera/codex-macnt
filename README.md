@@ -44,11 +44,6 @@ What the script does:
 - `mise run codex:ui:design` (Claude CLI generates `ui-design-overrides.candidate.json`)
 - `mise run codex:ui:pin` (promote candidate to pinned `ui-design-overrides.json`)
 - `mise run codex:ui:loop` (design candidate + print next steps)
-- `mise run codex:vm:check` (remote VM preflight)
-- `mise run codex:vm:linux:build` (remote Linux VM build)
-- `mise run codex:vm:win:build` (remote Windows VM build)
-- `mise run codex:vm:build` (remote Linux + Windows build)
-- `mise run codex:vm:release` (run remote VM builds, then follow local release steps)
 
 ## Output
 
@@ -113,13 +108,6 @@ Run:
 
 ```nu
 mise run codex:release
-```
-
-Remote build + release workflow:
-
-```nu
-mise run codex:vm:build
-mise run codex:vm:release
 ```
 
 ## Claude design loop (terminal)
