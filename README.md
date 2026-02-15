@@ -1,4 +1,4 @@
-# Codex Linux (Unofficial)
+# Codex Windows/Linux (Temporal)(Unofficial)
 
 Build a Linux-runnable Codex desktop app (`Codex.AppImage`) from the official macOS DMG.
 
