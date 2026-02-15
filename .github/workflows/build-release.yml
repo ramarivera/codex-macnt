@@ -560,7 +560,7 @@ jobs:
             - App: ${{ needs.extract.outputs.app_version }}
             - CLI tag: ${{ needs.extract.outputs.cli_tag }}
 
-            🤖 *This content was generated with AI assistance using GPT-5.*
+            🤖 *This content was generated with AI assistance using GPT-5.3-Codex.*
           draft: false
           prerelease: ${{ contains(steps.release-tag.outputs.tag, 'alpha') || contains(steps.release-tag.outputs.tag, 'beta') }}
         env:
