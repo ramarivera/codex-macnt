@@ -1,61 +1,77 @@
-# Codex Linux
+# Codex Linux (Unofficial)
 
-Build a Linux runnable Codex package from the official macOS DMG.
+Build a Linux-runnable Codex desktop app (`Codex.AppImage`) from the official macOS DMG.
 
-This repo is intentionally minimal and orchestration runs through `mise` tasks (`codex:*`).
+- Output: `./Codex.AppImage` + `./versions.json`
+- Orchestration: `mise` tasks (`codex:*`)
+- Status: community project, not affiliated with OpenAI
+
+## Quick Start 🚀
+
+```nu
+mise run codex:build
+./Codex.AppImage
+```
 
 ## Requirements
 
 - `mise`
 - Docker (or Podman with Docker CLI compatibility)
-- Optional for GUI runtime: `electron` on host (`npm install -g electron`)
+- Optional: `gh` (needed for `mise run codex:release`)
+- Optional: `electron` on host (`npm install -g electron`) for some dev/runtime flows
 
-`mise` installs/activates the required toolchain for the tasks (for example `node` and `jq`), so no separate manual Node setup is required.
+`mise` installs/activates the toolchain for tasks (notably `node` and `jq`), so there is no separate Node setup step.
 
-## Build
+## How It Works (Build Pipeline)
 
-Build (full pipeline):
+`mise run codex:build` runs a deterministic pipeline:
+
+1. Build a `codex-builder` container image (cached after first run).
+2. In container: download DMG (`CODEX_DMG_URL`), convert via `dmg2img`, extract app bundle, unpack `app.asar`.
+3. Inject the Codex CLI binary into the unpacked app:
+   - Default: download a prebuilt CLI (`CODEX_SKIP_RUST_BUILD=1` + `CODEX_PREBUILT_CLI_URL`).
+   - Optional: build from source by setting `CODEX_SKIP_RUST_BUILD=0`.
+4. On host: rebuild native Node modules for Electron ABI compatibility.
+5. Package `Codex.AppImage` into the repo root.
+6. Write `versions.json` (app version from AppImage `package.json`, CLI version from `--cli --version`).
+
+## Configuration ⚙️
+
+Environment variables (defaults live in `mise.toml`):
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `CODEX_DMG_URL` | official DMG URL | Download source for the macOS app bundle. |
+| `CODEX_GIT_REF` | `rust-v0.102.0-alpha.7` | Only used when building the CLI from source. Use `latest-tag` to auto-pick the newest buildable tag. |
+| `CODEX_SKIP_RUST_BUILD` | `1` | `1` downloads a prebuilt CLI; `0` builds from `openai/codex` in the container. |
+| `CODEX_PREBUILT_CLI_URL` | GitHub release tarball | Where to fetch the prebuilt CLI when `CODEX_SKIP_RUST_BUILD=1`. |
+| `CODEX_PREBUILT_SANDBOX_URL` | unset | Optional: fetch a prebuilt `codex-linux-sandbox` binary. |
+| `ENABLE_LINUX_UI_POLISH` | `1` | Toggle CSS-based UI polish injection at build time. |
+| `WORKDIR` | `~/.cache/codex-linux-port` | Build cache and docker bind mount workspace. |
+
+Examples (Nushell):
 
 ```nu
-mise run codex:build
+# Disable UI polish injection
+with-env { ENABLE_LINUX_UI_POLISH: "0" } { mise run codex:build }
+
+# Build CLI from source instead of downloading a prebuilt binary
+with-env { CODEX_SKIP_RUST_BUILD: "0" } { mise run codex:build }
+
+# Try the newest buildable upstream tag (can break; best-effort)
+with-env { CODEX_GIT_REF: "latest-tag", CODEX_SKIP_RUST_BUILD: "0" } { mise run codex:build }
 ```
 
-What the script does:
+## Tasks (Most Used)
 
-1. Builds a container image.
-2. Extracts the Codex DMG and app bundle in container.
-3. Builds the Rust CLI in container.
-4. Rebuilds native Node modules on host for Electron ABI compatibility.
-5. Packages a single `Codex.AppImage` in this directory.
-6. Writes `versions.json` with app and CLI versions.
-
-## Build tasks
-
-- `mise run codex:docker-build`
-- `mise run codex:docker-run`
-- `mise run codex:prepare-bundle`
-- `mise run codex:rebuild-native`
-- `mise run codex:package-appimage`
-- `mise run codex:versions`
-- `mise run codex:build` (full pipeline)
-- `mise run codex:release` (full build + GitHub release)
-- `mise run codex:ui:extract` (extract built UI assets)
-- `mise run codex:ui:capture` (run AppImage and capture live UI via `agent-browser`)
-- `mise run codex:ui:design` (Claude CLI generates `ui-design-overrides.candidate.json`)
-- `mise run codex:ui:pin` (promote candidate to pinned `ui-design-overrides.json`)
-- `mise run codex:ui:loop` (design candidate + print next steps)
-
-## Output
-
-After success, you get these artifacts locally from the Linux build path:
-
-- `./Codex.AppImage`
-- `./versions.json` (tracks `app` and `cli` versions)
-
-The GitHub release workflow also publishes:
-
-- `Codex-Setup-Windows-x64.exe` (NSIS installer)
-- `Codex-x86_64.AppImage` (portable Linux AppImage)
+- `mise run codex:build`: build `Codex.AppImage` + `versions.json`
+- `mise run codex:release`: run build and publish/update a GitHub release (requires `gh auth login`)
+- `mise run codex:cleanup`: delete build caches under `WORKDIR`
+- `mise run codex:ui:extract`: extract UI assets from `Codex.AppImage` into `.ui-inspect/`
+- `mise run codex:ui:capture`: run AppImage and capture a live screenshot via `agent-browser`
+- `mise run codex:ui:loop`: generate `ui-design-overrides.candidate.json` and print next steps
+- `mise run codex:ui:pin`: promote candidate overrides to pinned `ui-design-overrides.json`
+- `mise run codex:ui:iterate`: fast loop to apply overrides and re-capture a screenshot
 
 ## Run
 
@@ -65,91 +81,34 @@ GUI mode:
 ./Codex.AppImage
 ```
 
-CLI mode through AppImage:
+CLI mode (through AppImage):
 
 ```nu
 ./Codex.AppImage --cli --help
 ./Codex.AppImage --cli --version
 ```
 
-## Useful options
+## Troubleshooting 🧯
 
-Disable Linux UI polish during build:
-
-```nu
-with-env { ENABLE_LINUX_UI_POLISH: "0" } { mise run codex:build }
-```
-
-Force a specific `openai/codex` ref (branch/tag/commit):
-
-```nu
-with-env { CODEX_GIT_REF: "main" } { mise run codex:build }
-```
-
-Default behavior is a pinned known-good ref (`rust-v0.99.0-alpha.16`). Override with `CODEX_GIT_REF` if you want another ref.
-
-## Troubleshooting
-
-- `docker: command not found`: install Docker/Podman Docker CLI first.
+- `docker: command not found`: install Docker (or Podman with Docker CLI compatibility).
+- `❌ Could not locate app.asar`: the DMG extraction did not produce an app bundle; re-run and inspect `WORKDIR/docker-output` contents.
+- `Selected ref ... is not buildable`: set `CODEX_GIT_REF` to a known-good tag/commit, or use the default prebuilt CLI path (`CODEX_SKIP_RUST_BUILD=1`).
 - GUI says Electron is missing: install with `npm install -g electron`.
-- Build issues with upstream ref: pin `CODEX_GIT_REF` to a known good tag/commit.
 
-## Release automation
+## Shell Notes
 
-Use `mise run codex:release` to:
-
-1. Build `Codex.AppImage`.
-2. Detect app version from AppImage package metadata.
-3. Detect CLI version via `./Codex.AppImage --cli --version`.
-4. Update `versions.json` with both versions.
-5. Create or update a GitHub release with `gh` using tag `v<app-version>`.
-
-Run:
-
-```nu
-mise run codex:release
-```
-
-## Claude design loop (terminal)
-
-To co-design Linux polish with Claude Code CLI from terminal:
-
-```nu
-mise run codex:ui:loop
-```
-
-This flow:
-1. Extracts AppImage UI assets into `.ui-inspect/`.
-2. Runs the AppImage and captures live UI with `agent-browser` (`.ui-inspect/codex-current.png`, `.ui-inspect/codex-snapshot.json`).
-3. Asks `claude` CLI to produce candidate overrides in `ui-design-overrides.candidate.json`.
-4. Does not auto-apply anything (keeps output deterministic).
-
-Apply candidate intentionally:
-
-```nu
-mise run codex:ui:pin
-mise run codex:build
-```
-
-`codex:build` always uses pinned `ui-design-overrides.json`, so the UI does not change randomly between runs.
-
-## Nushell compatibility fallback
-
-If you use Bash/Zsh, equivalent env-var syntax is:
+If you use Bash/Zsh, env-var examples become:
 
 ```bash
 ENABLE_LINUX_UI_POLISH=0 mise run codex:build
-CODEX_GIT_REF=main mise run codex:build
+CODEX_SKIP_RUST_BUILD=0 mise run codex:build
+CODEX_GIT_REF=latest-tag CODEX_SKIP_RUST_BUILD=0 mise run codex:build
 ```
 
 ## Disclaimer
 
-This project was built end-to-end using the Codex app and Codex 5.3.
+This is an unofficial community project:
 
-This is an unofficial community project.
-
-- Project source is a hobbyist community build and reverse-engineering effort.
 - Not affiliated with, endorsed by, sponsored by, or officially supported by OpenAI, ChatGPT, or Codex.
-- Windows installer and Linux packaging are community-maintained adaptations and may differ from official OpenAI releases.
-- Use at your own risk; verify checksums and behavior before production use.
-- If you report issues, use this repository and include platform/version details.
+- Linux packaging and Windows installer artifacts are community-maintained and may differ from official releases.
+- Use at your own risk; verify checksums and behavior before trusting outputs.

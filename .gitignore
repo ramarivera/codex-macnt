@@ -2,7 +2,9 @@ dist/
 versions.json
 *.AppImage
 *.zip
+# Local agent workspace (keep out of the repo)
 .codex/
+.codex/MEMORIES.md
 .cleanup-stash/
 .ui-inspect/
 ui-design-overrides.candidate.json

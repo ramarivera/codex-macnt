@@ -1,11 +1,19 @@
-# Agent Instructions: Codex Linux
+# Agent Instructions: Codex Linux 🛠️
+
+## Quick Reference
+
+- Build: `mise run codex:build`
+- Outputs: `./Codex.AppImage`, `./versions.json`
+- Release: `mise run codex:release` (requires `gh auth login`)
+- Orchestration: `mise.toml` (`codex:*` tasks)
+- Key knobs: `CODEX_DMG_URL`, `CODEX_SKIP_RUST_BUILD`, `CODEX_PREBUILT_CLI_URL`, `CODEX_GIT_REF`, `ENABLE_LINUX_UI_POLISH`
 
 ## Project Overview
 
-This repository ports OpenAI's Codex (macOS-only desktop app) to Linux by:
-1. Extracting resources from the official macOS DMG
-2. Building the Rust CLI for Linux target
-3. Assembling a working Linux application
+This repo ports the Codex desktop app to Linux by:
+1. Extracting UI/resources from the official macOS DMG
+2. Injecting a Linux Codex CLI binary (prebuilt by default, optional source build)
+3. Packaging a runnable Linux AppImage
 
 ## Critical Rules
 
@@ -26,21 +34,19 @@ This repository ports OpenAI's Codex (macOS-only desktop app) to Linux by:
 ```
 ┌─────────────────────────────────────┐
 │  Host System (Linux)                │
-│  ├─ Downloads Codex DMG              │
-│  ├─ dmg2img → 7z extract             │
-│  ├─ asar extract → app_unpacked/     │
-│  └─ Runs install script              │
+│  ├─ Runs `mise` tasks                │
+│  ├─ Rebuilds native Node modules     │
+│  └─ Produces `Codex.AppImage`        │
 ├─────────────────────────────────────┤
 │  Rust Build                          │
-│  ├─ Clones openai/codex              │
-│  ├─ cargo build --release            │
-│  └─ Outputs: codex binary            │
+│  ├─ Default: download prebuilt CLI   │
+│  └─ Optional: cargo build in container│
 ├─────────────────────────────────────┤
 │  Assembly                            │
-│  ├─ mkdir -p resources               │
-│  ├─ cp codex resources/              │
-│  ├─ rm macOS-only files              │
-│  └─ Install to ~/.local/bin          │
+│  ├─ DMG → IMG → extract              │
+│  ├─ asar extract → app_unpacked/     │
+│  ├─ inject CLI into app bundle       │
+│  └─ package AppImage                 │
 └─────────────────────────────────────┘
 ```
 
@@ -49,7 +55,10 @@ This repository ports OpenAI's Codex (macOS-only desktop app) to Linux by:
 | File | Purpose |
 |------|---------|
 | `mise.toml` | Main build/release orchestration via `codex:*` tasks |
-| `Dockerfile` | Container environment (optional) |
+| `Dockerfile` | Builder container environment |
+| `.github/workflows/build-release.yml` | CI release pipeline (Linux AppImage + Windows installer artifacts) |
+| `ui-design-overrides.json` | Pinned Linux UI polish overrides (used by `codex:build`) |
+| `installer/` | Packaging/install glue (AppImage/desktop integration pieces) |
 
 ## Common Issues
 
@@ -61,33 +70,32 @@ This repository ports OpenAI's Codex (macOS-only desktop app) to Linux by:
 **Cause:** 7z cannot read DMG directly
 **Fix:** Use `dmg2img` to convert DMG→IMG first
 
-### "x86_64-linux-musl-gcc: not found"
-**Cause:** Trying to build with musl target, no cross compiler
-**Fix:** Fallback to native target or install musl-tools
-
 ### Docker cache issues
 **Cause:** COPY layer cached old script version
 **Fix:** `docker build --no-cache` or change Dockerfile to invalidate
 
 ## Build Process
 
-1. **Download**: `curl -o Codex.dmg $DMG_URL`
-2. **Extract DMG**: `dmg2img Codex.dmg Codex.img && 7z x Codex.img`
-3. **Extract ASAR**: `asar extract app.asar app_unpacked/`
-4. **Build Rust**: `cargo build --release --bin codex`
-5. **Assemble**: Copy binary, remove macOS files, create launcher
-6. **Install**: `cp codex ~/.local/bin/`
+Preferred entrypoint is the `mise` pipeline:
+
+1. `mise run codex:build`
+2. Run `./Codex.AppImage` (GUI) or `./Codex.AppImage --cli --help` (CLI)
+
+Internals (high-level):
+
+1. Download `Codex.dmg` from `CODEX_DMG_URL` (inside container).
+2. `dmg2img` and `7z` extract, then unpack `app.asar` into `app_unpacked/`.
+3. Inject the `codex` CLI into `resources/` and `resources/bin/`.
+4. Optionally apply Linux UI polish when `ENABLE_LINUX_UI_POLISH=1`.
+5. Package `Codex.AppImage`, then generate `versions.json`.
 
 ## Testing Checklist
 
-- [ ] DMG downloads successfully
-- [ ] dmg2img converts without error
-- [ ] 7z extracts IMG to get .app bundle
-- [ ] ASAR extracts to app_unpacked/
-- [ ] Rust compiles (may fallback from musl to native)
-- [ ] resources/ directory exists before copy
-- [ ] codex binary installed to PATH
-- [ ] Launcher script created
+- [ ] `mise run codex:build` completes
+- [ ] `./Codex.AppImage --cli --version` runs successfully
+- [ ] `versions.json` exists and contains non-empty `app` and `cli` fields
+- [ ] GUI launches (`./Codex.AppImage`) when testing UI/runtime changes
+- [ ] If changing Rust build path (`CODEX_SKIP_RUST_BUILD=0`): container `cargo build` succeeds
 
 ## Docker Notes
 
@@ -97,15 +105,13 @@ Local builds use Docker via `mise` (see `mise.toml`).
 
 ## Dependencies
 
-System packages:
-- p7zip-full
-- dmg2img
-- build-essential
-- libssl-dev
-- pkg-config
+Host requirements:
+- `mise`
+- Docker (or Podman with Docker CLI compatibility)
+- Optional: `gh` (for `codex:release`)
 
-Rust/cargo (via rustup)
-Node.js + npm
+Builder image dependencies (Dockerfile installs these):
+- `dmg2img`, `p7zip`, build toolchain, Node/npm, Rust toolchain (when building from source)
 
 ## Reverse Engineering Notes
 
