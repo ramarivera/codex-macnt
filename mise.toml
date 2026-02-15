@@ -11,6 +11,7 @@ ENABLE_LINUX_UI_POLISH = "1"
 CODEX_GIT_REF = "rust-v0.102.0-alpha.7"
 CODEX_SKIP_RUST_BUILD = "1"
 CODEX_PREBUILT_CLI_URL = "https://github.com/openai/codex/releases/download/rust-v0.102.0-alpha.7/codex-x86_64-unknown-linux-gnu.tar.gz"
+CODEX_PREBUILT_SANDBOX_URL = ""
 
 [tasks."codex:docker-build"]
 description = "Build codex-builder Docker image"
@@ -43,16 +44,16 @@ docker run --rm \
   -e HOST_UID="$host_uid" \
   -e HOST_GID="$host_gid" \
   -v "{{env.WORKDIR}}:/workdir" \
+  -v "{{config_root}}:/config:ro" \
   codex-builder -c '
 set -euo pipefail
 rm -rf /workdir/docker-output
 mkdir -p /workdir/docker-output
+if [ -f /config/ui-design-overrides.json ]; then
+  cp /config/ui-design-overrides.json /workdir/docker-output/ui-design-overrides.json
+fi
 chown -R "$HOST_UID:$HOST_GID" /workdir/docker-output
 '
-
-if [ -f "{{config_root}}/ui-design-overrides.json" ]; then
-  cp "{{config_root}}/ui-design-overrides.json" "$docker_output_dir/ui-design-overrides.json"
-fi
 
 docker run --rm \
   --entrypoint bash \
@@ -418,6 +419,9 @@ chmod +x codex-linux.sh
 # Ensure bind-mounted outputs are writable by the invoking user on the host.
 chown -R "${HOST_UID}:${HOST_GID}" /output 2>/dev/null || true
 '
+
+# Fix ownership for rootless Docker compatibility
+sudo chown -R "$(id -u):$(id -g)" "{{env.WORKDIR}}/docker-output" 2>/dev/null || true
 """
 
 [tasks."codex:prepare-bundle"]
