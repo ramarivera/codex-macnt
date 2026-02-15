@@ -27,6 +27,17 @@
   !define APP_ICON ""
 !endif
 
+; If a custom icon was provided, apply it to the installer UI and the uninstaller.
+; Note: APP_ICON is expected to be a path inside SOURCE_DIR (build-time) and inside
+; $INSTDIR (install-time), e.g. "resources\app\resources\codex-icon.ico".
+!if "${APP_ICON}" != ""
+  !define _ICON_SRC "${SOURCE_DIR}\${APP_ICON}"
+  !define MUI_ICON "${_ICON_SRC}"
+  !define MUI_UNICON "${_ICON_SRC}"
+  Icon "${_ICON_SRC}"
+  UninstallIcon "${_ICON_SRC}"
+!endif
+
 Name "${APP_NAME} ${APP_VERSION}"
 OutFile "Codex-Setup-${APP_VERSION}-x64.exe"
 InstallDir "$LOCALAPPDATA\${APP_NAME}"

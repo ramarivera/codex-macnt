@@ -9,3 +9,6 @@ ui-design-overrides.candidate.json
 # VM orchestration runtime artifacts
 infra/vm/artifacts/
 
+# Local download/extract scratch
+.tmp-codex-assets/
+.tmp-codex-extract/

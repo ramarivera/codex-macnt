@@ -3,23 +3,28 @@
 # Builds both Windows installer and Linux AppImage in parallel
 # Creates a combined GitHub release with both artifacts
 #
-# Trigger: Push CLI binaries to dist/ directory
-#   mise run codex:win:compile   # Build Windows CLI
-#   mise run codex:linux:compile # Build Linux CLI
-#   git add dist/ && git commit && git push
+# Trigger: Push packaging changes, or run manually.
+# CLI binaries are downloaded from the official openai/codex GitHub releases.
 
 name: Build and Release Codex
 
 on:
   workflow_dispatch:
+    inputs:
+      cli_tag:
+        description: "openai/codex release tag to download CLI binaries from (e.g. rust-v0.102.0-alpha.7)"
+        required: false
+        default: "rust-v0.102.0-alpha.7"
   push:
     paths:
-      - "dist/windows-x64/codex.exe"
-      - "dist/linux-x64/codex"
       - ".github/workflows/build-release.yml"
+      - "versions.json"
+      - "installer/windows/codex.nsi"
+      - "infra/vm/guest/windows-build.ps1"
 
 env:
   CODEX_DMG_URL: "https://persistent.oaistatic.com/codex-app-prod/Codex.dmg"
+  CODEX_CLI_TAG: "rust-v0.102.0-alpha.7"
 
 jobs:
   # ═══════════════════════════════════════════════════════════════════════════
@@ -30,27 +35,52 @@ jobs:
     outputs:
       electron_version: ${{ steps.get-versions.outputs.electron_version }}
       app_version: ${{ steps.get-versions.outputs.app_version }}
+      cli_tag: ${{ steps.cli-tag.outputs.cli_tag }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify CLI binaries exist
+      - name: Download CLI binaries (Linux + Windows)
+        id: cli-tag
         run: |
-          if [ ! -f dist/windows-x64/codex.exe ]; then
-            echo "❌ dist/windows-x64/codex.exe not found" >&2
-            exit 1
+          set -euo pipefail
+          cli_tag="${{ inputs.cli_tag }}"
+          if [ -z "$cli_tag" ]; then
+            cli_tag="$CODEX_CLI_TAG"
           fi
-          if [ ! -f dist/linux-x64/codex ]; then
-            echo "❌ dist/linux-x64/codex not found" >&2
-            exit 1
-          fi
-          echo "✅ Both CLI binaries present"
-          file dist/windows-x64/codex.exe
-          file dist/linux-x64/codex
+          echo "cli_tag=$cli_tag" >> "$GITHUB_OUTPUT"
+          echo "Using CLI tag: $cli_tag"
+
+          mkdir -p cli-binaries _cli_tmp/linux _cli_tmp/win
+
+          linux_asset="codex-x86_64-unknown-linux-gnu.tar.gz"
+          win_asset="codex-x86_64-pc-windows-msvc.exe.zip"
+
+          curl -sL --fail -o "_cli_tmp/$linux_asset" \
+            "https://github.com/openai/codex/releases/download/$cli_tag/$linux_asset"
+          tar -xzf "_cli_tmp/$linux_asset" -C _cli_tmp/linux
+          mv _cli_tmp/linux/codex-x86_64-unknown-linux-gnu cli-binaries/codex
+          chmod +x cli-binaries/codex
+
+          curl -sL --fail -o "_cli_tmp/$win_asset" \
+            "https://github.com/openai/codex/releases/download/$cli_tag/$win_asset"
+          unzip -q "_cli_tmp/$win_asset" -d _cli_tmp/win
+          mv _cli_tmp/win/codex-x86_64-pc-windows-msvc.exe cli-binaries/codex.exe
+
+          echo "✅ Downloaded CLI binaries:"
+          file cli-binaries/codex
+          file cli-binaries/codex.exe
+
+      - name: Upload CLI binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-binaries
+          path: cli-binaries
+          retention-days: 30
 
       - name: Install extraction tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full dmg2img icnsutils imagemagick
+          sudo apt-get install -y p7zip-full dmg2img icnsutils imagemagick unzip
           npm install -g @electron/asar
 
       - name: Download and extract DMG
@@ -75,7 +105,8 @@ jobs:
                 TARGET_PNG=$(ls -S codex-icon_*.png 2>/dev/null | head -1)
               fi
               if [ -n "$TARGET_PNG" ]; then
-                convert "$TARGET_PNG" -resize 256x256 codex-icon.ico
+                # Create a multi-resolution ICO so Windows can pick the best size
+                convert "$TARGET_PNG" -define icon:auto-resize=256,128,64,48,32,16 codex-icon.ico
                 echo "✅ Created codex-icon.ico"
               fi
             fi
@@ -200,6 +231,38 @@ jobs:
           rm -f electron-dist/resources/default_app.asar
           mv app_unpacked electron-dist/resources/app
           mv electron-dist/electron.exe electron-dist/Codex.exe
+
+          # Patch the EXE icon so the titlebar/taskbar icon is Codex (not Electron).
+          # This affects the running app window icon; shortcuts alone are not enough.
+          if [ -f "codex-icon/codex-icon.ico" ]; then
+            echo "Patching Codex.exe icon with rcedit..."
+            RCEDIT_URL="$(python - <<'PY'
+import json, re, urllib.request
+data = json.load(urllib.request.urlopen("https://api.github.com/repos/electron/rcedit/releases/latest"))
+for a in data.get("assets", []):
+    name = a.get("name", "")
+    url = a.get("browser_download_url", "")
+    if not url:
+        continue
+    if re.search(r"(?:^|/)rcedit.*x64.*\\.exe$", name, re.IGNORECASE):
+        print(url)
+        raise SystemExit(0)
+    if re.search(r"(?:^|/)rcedit.*\\.exe$", name, re.IGNORECASE) and "x64" in name.lower():
+        print(url)
+        raise SystemExit(0)
+print("")
+PY
+)"
+            if [ -z "$RCEDIT_URL" ]; then
+              echo "⚠️  Could not resolve rcedit download URL; skipping EXE icon patch"
+            else
+              curl -sL --fail -o rcedit.exe "$RCEDIT_URL"
+              ./rcedit.exe "electron-dist/Codex.exe" --set-icon "codex-icon/codex-icon.ico"
+              rm -f rcedit.exe
+            fi
+          else
+            echo "⚠️  codex-icon.ico missing; skipping EXE icon patch"
+          fi
           
           # Copy Windows CLI binary
           mkdir -p \
@@ -209,7 +272,7 @@ jobs:
             electron-dist/resources/app/bin \
             electron-dist/resources \
             electron-dist/resources/bin
-          cp "$GITHUB_WORKSPACE/dist/windows-x64/codex.exe" electron-dist/resources/app/resources/codex.exe
+          cp "$GITHUB_WORKSPACE/cli-binaries/codex.exe" electron-dist/resources/app/resources/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/resources/bin/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/codex.exe
           cp electron-dist/resources/app/resources/codex.exe electron-dist/resources/app/bin/codex.exe
@@ -309,14 +372,14 @@ jobs:
           
           # Copy Linux CLI binary
           mkdir -p AppDir/usr/share/codex/resources AppDir/usr/share/codex/resources/bin
-          cp "$GITHUB_WORKSPACE/dist/linux-x64/codex" AppDir/usr/share/codex/resources/codex
+          cp "$GITHUB_WORKSPACE/cli-binaries/codex" AppDir/usr/share/codex/resources/codex
           cp AppDir/usr/share/codex/resources/codex AppDir/usr/share/codex/resources/bin/codex
           chmod +x AppDir/usr/share/codex/resources/codex
           chmod +x AppDir/usr/share/codex/resources/bin/codex
           
           # Copy sandbox if available
-          if [ -f "$GITHUB_WORKSPACE/dist/linux-x64/codex-linux-sandbox" ]; then
-            cp "$GITHUB_WORKSPACE/dist/linux-x64/codex-linux-sandbox" AppDir/usr/share/codex/resources/
+          if [ -f "$GITHUB_WORKSPACE/cli-binaries/codex-linux-sandbox" ]; then
+            cp "$GITHUB_WORKSPACE/cli-binaries/codex-linux-sandbox" AppDir/usr/share/codex/resources/
             chmod +x AppDir/usr/share/codex/resources/codex-linux-sandbox
           fi
           
@@ -421,8 +484,8 @@ jobs:
         id: versions
         run: |
           # Try to extract versions from binaries
-          win_cli_ver=$(file dist/windows-x64/codex.exe 2>/dev/null | grep -oP '\d+\.\d+\.\d+[^)]*' | head -1 || echo "unknown")
-          linux_cli_ver=$(strings dist/linux-x64/codex 2>/dev/null | grep -oP '\d+\.\d+\.\d+[^ ]*' | head -1 || echo "unknown")
+          win_cli_ver=$(file artifacts/cli-binaries/codex.exe 2>/dev/null | grep -oP '\d+\.\d+\.\d+[^)]*' | head -1 || echo "unknown")
+          linux_cli_ver=$(strings artifacts/cli-binaries/codex 2>/dev/null | grep -oP '\d+\.\d+\.\d+[^ ]*' | head -1 || echo "unknown")
           echo "windows_cli=$win_cli_ver" >> "$GITHUB_OUTPUT"
           echo "linux_cli=$linux_cli_ver" >> "$GITHUB_OUTPUT"
 
@@ -468,7 +531,7 @@ jobs:
             
             ### Versions
             - App: ${{ needs.extract.outputs.app_version }}
-            - CLI: Built from ${{ env.CODEX_GIT_REF }}
+            - CLI tag: ${{ needs.extract.outputs.cli_tag }}
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
         env:

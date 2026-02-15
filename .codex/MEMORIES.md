@@ -62,3 +62,11 @@
 - What was learned: Windows guests over OpenSSH are easiest when all remote commands are explicit `powershell ...` and file transfer uses `scp` rather than trying to stream bytes via `ssh ... cat`.
 - Better prompt suggestion for Ramiro: When a VM build fails, paste the first failing SSH command line and the exact exit code; it usually reveals whether the remote shell assumptions are wrong.
 - Current decision/next step: Run `mise run codex:vm:win:build` against the Arch/Cachy VM host and, if it fails, capture the remote run folder under `infra/vm/artifacts/<run_id>/` for diagnostics.
+
+## 2026-02-15
+- Task title: Fix Windows app icon (Electron default -> Codex icon)
+- Category: Procedural
+- What happened: Updated the Windows packaging flow to patch `Codex.exe` with the real Codex `.ico` using `rcedit`, and updated the NSIS script to apply the same icon to the installer/uninstaller UI when `APP_ICON` is provided.
+- What was learned: Changing shortcut icons is not enough for the running app; Windows titlebar/taskbar icons come from the EXE’s embedded icon, so the Electron runtime EXE must be patched (or packaged) with the correct `.ico`.
+- Better prompt suggestion for Ramiro: When reporting icon issues, specify whether you mean installer icon, Start Menu shortcut icon, or the running window/taskbar icon, since they’re controlled by different steps.
+- Current decision/next step: Trigger a new Windows build (GitHub Actions or VM build) and confirm the running app shows the Codex icon in the titlebar and taskbar.

@@ -59,6 +59,36 @@ function Ensure-Makensis {
     throw "NSIS (makensis) unavailable; install NSIS and ensure makensis is on PATH."
 }
 
+$script:RceditPath = $null
+function Ensure-Rcedit {
+    if ($script:RceditPath -and (Test-Path $script:RceditPath)) { return $script:RceditPath }
+
+    $dst = Join-Path $installerWorkdir 'rcedit.exe'
+    if (Test-Path $dst) {
+        $script:RceditPath = $dst
+        return $dst
+    }
+
+    Write-Step "Fetching rcedit (for EXE icon patching)"
+    try {
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/electron/rcedit/releases/latest"
+        $asset = $rel.assets | Where-Object { $_.name -match 'rcedit.*x64.*\\.exe$' } | Select-Object -First 1
+        if (-not $asset) {
+            $asset = $rel.assets | Where-Object { ($_.name -match 'rcedit.*\\.exe$') -and ($_.name -match 'x64') } | Select-Object -First 1
+        }
+        if (-not $asset) {
+            Write-Step "rcedit asset not found in latest release; skipping EXE icon patching"
+            return $null
+        }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $dst
+        $script:RceditPath = $dst
+        return $dst
+    } catch {
+        Write-Step "Failed to fetch rcedit; skipping EXE icon patching: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 $ProjectPath = Convert-ToWindowsPath $ProjectPath
 $OutputDir = Convert-ToWindowsPath $OutputDir
 
@@ -268,6 +298,16 @@ $iconSource = Get-ChildItem $installerDir -Recurse -Filter 'codex-icon.ico' -Err
 if ($iconSource) {
     Copy-Item $iconSource.FullName (Join-Path $distDir 'codex-icon.ico') -Force
     $iconArg = '-DAPP_ICON=codex-icon.ico'
+}
+
+$appExe = Join-Path $distDir 'Codex.exe'
+$iconInDist = Join-Path $distDir 'codex-icon.ico'
+if ((Test-Path $appExe) -and (Test-Path $iconInDist)) {
+    $rcedit = Ensure-Rcedit
+    if ($rcedit) {
+        Write-Step "Patching EXE icon: $appExe"
+        & $rcedit $appExe --set-icon $iconInDist | Out-Null
+    }
 }
 
 $packagePathForVer = if ($useBundledZip) { Join-Path $distDir 'package.json' } else { Join-Path $installerWorkdir 'app_unpacked/package.json' }
