@@ -543,6 +543,8 @@ jobs:
             ### Versions
             - App: ${{ needs.extract.outputs.app_version }}
             - CLI tag: ${{ needs.extract.outputs.cli_tag }}
+
+            🤖 *This content was generated with AI assistance using GPT-5.*
           draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
         env:
