@@ -47,7 +47,8 @@ SetCompressor /SOLID lzma
 BrandingText "${APP_NAME} Unofficial Installer"
 
 !define MUI_TEXT_WELCOME_INFO_TITLE "${APP_NAME} (Community Build)"
-!define MUI_TEXT_WELCOME_INFO_TEXT "${APP_NAME} for Windows${\r\n}${\r\n}This installer is provided as a community-maintained distribution.${\r\n}It is not official software from OpenAI and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex."
+; Use NSIS newline escapes (the ${\r\n} form can render literally on some setups).
+!define MUI_TEXT_WELCOME_INFO_TEXT "${APP_NAME} for Windows$\r$\n$\r$\nThis installer is provided as a community-maintained distribution.$\r$\nIt is not official software from OpenAI and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex."
 
 ; --- MUI pages ---
 !insertmacro MUI_PAGE_WELCOME
