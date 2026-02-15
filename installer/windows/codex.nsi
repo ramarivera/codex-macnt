@@ -56,7 +56,7 @@ BrandingText "${APP_NAME} Unofficial Installer"
 ; ============================================================
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "${SOURCE_DIR}\*.*"
+  File /r "${SOURCE_DIR}/*.*"
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"

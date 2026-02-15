@@ -7,7 +7,8 @@ param(
     [string] $EnableLinuxUiPolish = "1",
     [bool] $SkipRustBuild = $false,
     [bool] $SkipRebuildNative = $false,
-    [string] $PrebuiltCliUrl = ""
+    [string] $PrebuiltCliUrl = "",
+    [string] $BundledWindowsZip = ""
 )
 
 $ErrorActionPreference = 'Stop'
@@ -39,6 +40,25 @@ function Ensure-Command {
     }
 }
 
+$manifest = $null
+
+function Ensure-Makensis {
+    if (Get-Command makensis -ErrorAction SilentlyContinue) { return }
+
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        Write-Step "makensis not found; attempting install via winget (NSIS.NSIS)"
+        & winget install --id NSIS.NSIS --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        if (Get-Command makensis -ErrorAction SilentlyContinue) { return }
+        $candidate = "C:\\Program Files (x86)\\NSIS\\makensis.exe"
+        if (Test-Path $candidate) {
+            $env:PATH = "$([System.IO.Path]::GetDirectoryName($candidate));$env:PATH"
+            return
+        }
+    }
+
+    throw "NSIS (makensis) unavailable; install NSIS and ensure makensis is on PATH."
+}
+
 $ProjectPath = Convert-ToWindowsPath $ProjectPath
 $OutputDir = Convert-ToWindowsPath $OutputDir
 
@@ -51,8 +71,6 @@ if (-not $SkipRustBuild) {
     Ensure-Command git "Install Git for Windows or Git via package manager."
     Ensure-Command cargo "Install rustup and toolchains with the MSVC/Windows target."
 }
-Ensure-Command node "Install Node.js before running this script."
-Ensure-Command npm "Install npm with Node.js before running this script."
 
 $env:CODEX_GIT_REF = $GitRef
 $env:CODEX_DMG_URL = $DmgUrl
@@ -64,49 +82,60 @@ $installerWorkdir = Join-Path $ProjectPath '.codex-vm-windows'
 New-Item -ItemType Directory -Path $installerWorkdir -Force | Out-Null
 Set-Location $installerWorkdir
 
-if (Test-Path Codex.dmg) {
-    Write-Step "Using existing Codex.dmg"
+$zipCandidate = $BundledWindowsZip
+if (-not $zipCandidate) {
+    $zipCandidate = Join-Path $ProjectPath "Codex-Windows-x64.zip"
+}
+
+$useBundledZip = Test-Path $zipCandidate
+
+if ($useBundledZip) {
+    Write-Step "Using bundled Windows app zip: $zipCandidate"
+    # Extract into installer workdir; zip contains top-level folder `codex-windows-x64/`.
+    if (Test-Path (Join-Path $installerWorkdir "codex-windows-x64")) {
+        Remove-Item (Join-Path $installerWorkdir "codex-windows-x64") -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Expand-Archive -Path $zipCandidate -DestinationPath $installerWorkdir -Force
 } else {
-    Write-Step "Downloading DMG from $DmgUrl"
-    Invoke-WebRequest -Uri $DmgUrl -OutFile Codex.dmg
-}
+    Ensure-Command node "Install Node.js before running this script."
+    Ensure-Command npm "Install npm with Node.js before running this script."
 
-if (-not (Test-Path Codex.img)) {
-    Ensure-Command dmg2img "Install dmg2img via Chocolatey/scoop/wget package and retry."
-    Write-Step "Converting DMG with dmg2img"
-    dmg2img Codex.dmg Codex.img | Out-Null
-}
+    if (Test-Path Codex.dmg) {
+        Write-Step "Using existing Codex.dmg"
+    } else {
+        Write-Step "Downloading DMG from $DmgUrl"
+        Invoke-WebRequest -Uri $DmgUrl -OutFile Codex.dmg
+    }
 
-if (-not (Test-Path extracted)) {
-    Ensure-Command 7z "Install 7-Zip before continuing."
-    Write-Step "Extracting app.asar from DMG/IMG using 7z"
-    & 7z x Codex.img -oextracted/ -y | Out-Null
-}
+    if (-not (Test-Path Codex.img)) {
+        Ensure-Command dmg2img "Install dmg2img and retry (or provide Codex-Windows-x64.zip to avoid DMG extraction)."
+        Write-Step "Converting DMG with dmg2img"
+        dmg2img Codex.dmg Codex.img | Out-Null
+    }
 
-$asarPath = Get-ChildItem -Path extracted -Recurse -Filter app.asar | Select-Object -First 1
-if (-not $asarPath) {
-    throw "Could not locate app.asar in extracted DMG payload"
-}
+    if (-not (Test-Path extracted)) {
+        Ensure-Command 7z "Install 7-Zip before continuing."
+        Write-Step "Extracting app.asar from DMG/IMG using 7z"
+        & 7z x Codex.img -oextracted/ -y | Out-Null
+    }
 
-$localAsar = Join-Path $installerWorkdir 'app.asar'
-Copy-Item -Path $asarPath.FullName -Destination $localAsar -Force
+    $asarPath = Get-ChildItem -Path extracted -Recurse -Filter app.asar | Select-Object -First 1
+    if (-not $asarPath) {
+        throw "Could not locate app.asar in extracted DMG payload"
+    }
 
-if (-not (Get-Command asar -ErrorAction SilentlyContinue)) {
-    Write-Step "asar CLI missing; installing @electron/asar temporarily"
-    npm install -g @electron/asar | Out-Null
-}
+    $localAsar = Join-Path $installerWorkdir 'app.asar'
+    Copy-Item -Path $asarPath.FullName -Destination $localAsar -Force
 
-if (-not (Test-Path app_unpacked)) {
-    Write-Step "Extracting ASAR bundle"
-    New-Item -ItemType Directory -Path app_unpacked | Out-Null
-    asar extract "$localAsar" app_unpacked
-}
+    if (-not (Get-Command asar -ErrorAction SilentlyContinue)) {
+        Write-Step "asar CLI missing; installing @electron/asar temporarily"
+        npm install -g @electron/asar | Out-Null
+    }
 
-$manifestPath = Join-Path $installerWorkdir 'app_unpacked/package.json'
-if (Test-Path $manifestPath) {
-    $json = Get-Content $manifestPath -Raw | ConvertFrom-Json
-    if ($json.version) {
-        Write-Step "Packaging against app version $($json.version)"
+    if (-not (Test-Path app_unpacked)) {
+        Write-Step "Extracting ASAR bundle"
+        New-Item -ItemType Directory -Path app_unpacked | Out-Null
+        asar extract "$localAsar" app_unpacked
     }
 }
 
@@ -124,11 +153,14 @@ if ($SkipRustBuild) {
     Write-Step "Downloading prebuilt codex.exe from $PrebuiltCliUrl"
     Invoke-WebRequest -Uri $PrebuiltCliUrl -OutFile $cliDownloadPath
 
-    $cliDstDir = Join-Path $installerWorkdir 'app_unpacked/resources'
+    if ($useBundledZip) {
+        $cliDstDir = Join-Path $installerWorkdir 'codex-windows-x64/resources'
+    } else {
+        $cliDstDir = Join-Path $installerWorkdir 'app_unpacked/resources'
+    }
     New-Item -ItemType Directory -Path $cliDstDir -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $cliDstDir 'bin') -Force | Out-Null
-    $cliDst = Join-Path $cliDstDir 'codex.exe'
-    Copy-Item $cliDownloadPath $cliDst -Force
+    Copy-Item $cliDownloadPath (Join-Path $cliDstDir 'codex.exe') -Force
     Copy-Item $cliDownloadPath (Join-Path $cliDstDir 'bin/codex.exe') -Force
 } else {
     if (Test-Path codex-src) {
@@ -169,7 +201,10 @@ if ($SkipRustBuild) {
 Set-Location $installerWorkdir
 
 # Rebuild native modules for Windows/ Electron ABI
-if (-not $SkipRebuildNative) {
+if ((-not $SkipRebuildNative) -and (-not $useBundledZip)) {
+    Ensure-Command node "Install Node.js before running this script."
+    Ensure-Command npm "Install npm with Node.js before running this script."
+
     $packagePath = Join-Path $installerWorkdir 'app_unpacked/package.json'
     $appNodeDeps = Get-Content $packagePath -Raw | ConvertFrom-Json
     $targetElectron = ($appNodeDeps.devDependencies.electron -replace '^\\^', '')
@@ -206,24 +241,19 @@ $electronDir = Join-Path $installerWorkdir 'electron-dist'
 if (-not (Test-Path $electronDir)) { New-Item -ItemType Directory -Path $electronDir | Out-Null }
 
 $distDir = Join-Path $installerWorkdir 'codex-windows-x64'
-if (Test-Path $distDir) { Remove-Item $distDir -Recurse -Force }
-Copy-Item -Recurse (Join-Path $installerWorkdir 'app_unpacked') $distDir -Force
-New-Item -ItemType Directory -Path (Join-Path $distDir 'resources/bin') -Force | Out-Null
-Copy-Item "$installerWorkdir/app_unpacked/resources/codex.exe" (Join-Path $distDir 'resources/codex.exe') -Force
-Copy-Item "$installerWorkdir/app_unpacked/resources/codex.exe" (Join-Path $distDir 'resources/bin/codex.exe') -Force
-
-$nsis = Get-Command makensis -ErrorAction SilentlyContinue
-if (-not $nsis) {
-    Write-Step "NSIS not available; attempting Chocolatey install"
-    if (Get-Command choco -ErrorAction SilentlyContinue) {
-        choco install nsis -y --no-progress | Out-Null
-        $nsis = Get-Command makensis -ErrorAction SilentlyContinue
+if ($useBundledZip) {
+    if (-not (Test-Path $distDir)) {
+        throw "Bundled zip extraction failed; expected folder missing: $distDir"
     }
+} else {
+    if (Test-Path $distDir) { Remove-Item $distDir -Recurse -Force }
+    Copy-Item -Recurse (Join-Path $installerWorkdir 'app_unpacked') $distDir -Force
+    New-Item -ItemType Directory -Path (Join-Path $distDir 'resources/bin') -Force | Out-Null
+    Copy-Item "$installerWorkdir/app_unpacked/resources/codex.exe" (Join-Path $distDir 'resources/codex.exe') -Force
+    Copy-Item "$installerWorkdir/app_unpacked/resources/codex.exe" (Join-Path $distDir 'resources/bin/codex.exe') -Force
 }
 
-if (-not $nsis) {
-    throw "NSIS unavailable; cannot produce Codex-Setup-Windows-x64.exe"
-}
+Ensure-Makensis
 
 $installerDir = Join-Path $ProjectPath 'installer/windows'
 $nsiTemplate = Join-Path $installerDir 'codex.nsi'
@@ -240,7 +270,8 @@ if ($iconSource) {
     $iconArg = '-DAPP_ICON=codex-icon.ico'
 }
 
-$appVer = (Get-Content (Join-Path $installerWorkdir 'app_unpacked/package.json') -Raw | ConvertFrom-Json).version
+$packagePathForVer = if ($useBundledZip) { Join-Path $distDir 'package.json' } else { Join-Path $installerWorkdir 'app_unpacked/package.json' }
+$appVer = (Get-Content $packagePathForVer -Raw | ConvertFrom-Json).version
 $manifest = Join-Path $OutputDir "manifest.json"
 
 Set-Location $distDir
@@ -258,6 +289,19 @@ if (-not (Test-Path $installerOut)) {
 }
 
 Move-Item $installerOut (Join-Path $OutputDir 'Codex-Setup-Windows-x64.exe') -Force
+
+$manifestObj = [ordered]@{
+    run_id = $RunId
+    app_version = $appVer
+    git_ref = $GitRef
+    dmg_url = $DmgUrl
+    bundled_windows_zip = if ($useBundledZip) { $zipCandidate } else { "" }
+    skip_rust_build = $SkipRustBuild
+    skip_rebuild_native = $SkipRebuildNative
+    prebuilt_cli_url = $PrebuiltCliUrl
+    timestamp_utc = (Get-Date).ToUniversalTime().ToString("o")
+}
+$manifestObj | ConvertTo-Json -Depth 6 | Set-Content -Path $manifest -Encoding utf8
 
 @"
 {
