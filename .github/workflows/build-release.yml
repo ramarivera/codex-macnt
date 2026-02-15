@@ -236,7 +236,27 @@ jobs:
           # This affects the running app window icon; shortcuts alone are not enough.
           if [ -f "codex-icon/codex-icon.ico" ]; then
             echo "Patching Codex.exe icon with rcedit..."
-            RCEDIT_URL="$(python -c \"import json,re,urllib.request,sys; data=json.load(urllib.request.urlopen('https://api.github.com/repos/electron/rcedit/releases/latest'));\\nfor a in data.get('assets', []):\\n  name=a.get('name',''); url=a.get('browser_download_url','');\\n  if not url: continue\\n  if re.search(r'(?:^|/)rcedit.*x64.*\\\\.exe$', name, re.I) or (re.search(r'(?:^|/)rcedit.*\\\\.exe$', name, re.I) and 'x64' in name.lower()):\\n    print(url); sys.exit(0)\\nprint('')\")"
+            RCEDIT_URL="$(python - <<'PY'
+          import json
+          import re
+          import urllib.request
+          
+          data = json.load(urllib.request.urlopen("https://api.github.com/repos/electron/rcedit/releases/latest"))
+          for a in data.get("assets", []):
+              name = a.get("name", "")
+              url = a.get("browser_download_url", "")
+              if not url:
+                  continue
+              if re.search(r"rcedit.*x64.*\\.exe$", name, re.IGNORECASE):
+                  print(url)
+                  break
+              if re.search(r"rcedit.*\\.exe$", name, re.IGNORECASE) and "x64" in name.lower():
+                  print(url)
+                  break
+          else:
+              print("")
+          PY
+            )"
             if [ -z "$RCEDIT_URL" ]; then
               echo "⚠️  Could not resolve rcedit download URL; skipping EXE icon patch"
             else
