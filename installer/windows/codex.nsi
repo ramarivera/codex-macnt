@@ -17,15 +17,25 @@
 
 ; --- Application metadata ---
 !define APP_NAME        "Codex"
-!define APP_PUBLISHER   "OpenAI"
+!define APP_PUBLISHER   "Community contributors"
 !define APP_EXE         "Codex.exe"
 !define CLI_EXE         "resources\app\resources\bin\codex.exe"
 !define UNINSTALL_KEY   "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
-
 ; Optional: Path to custom icon (extracted from DMG or provided at build time)
 ; If not defined, will use the executable's icon
 !ifndef APP_ICON
   !define APP_ICON ""
+!endif
+
+; If a custom icon was provided, apply it to the installer UI and the uninstaller.
+; Note: APP_ICON is expected to be a path inside SOURCE_DIR (build-time) and inside
+; $INSTDIR (install-time), e.g. "resources\app\resources\codex-icon.ico".
+!if "${APP_ICON}" != ""
+  !define _ICON_SRC "${SOURCE_DIR}\${APP_ICON}"
+  !define MUI_ICON "${_ICON_SRC}"
+  !define MUI_UNICON "${_ICON_SRC}"
+  Icon "${_ICON_SRC}"
+  UninstallIcon "${_ICON_SRC}"
 !endif
 
 Name "${APP_NAME} ${APP_VERSION}"
@@ -34,6 +44,10 @@ InstallDir "$LOCALAPPDATA\${APP_NAME}"
 InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
+BrandingText "${APP_NAME} Unofficial Installer"
+
+!define MUI_TEXT_WELCOME_INFO_TITLE "${APP_NAME} (Community Build)"
+!define MUI_TEXT_WELCOME_INFO_TEXT "${APP_NAME} for Windows${\r\n}${\r\n}This installer is provided as a community-maintained distribution.${\r\n}It is not official software from OpenAI and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex."
 
 ; --- MUI pages ---
 !insertmacro MUI_PAGE_WELCOME
@@ -53,7 +67,10 @@ SetCompressor /SOLID lzma
 ; ============================================================
 Section "Install"
   SetOutPath "$INSTDIR"
-  File /r "${SOURCE_DIR}\*.*"
+  ; SOURCE_DIR is passed as a Windows path (e.g. D:\...\codex-windows-x64). NSIS
+  ; does not reliably handle forward slashes in File wildcards, so keep it
+  ; backslash-based and include extensionless files too.
+  File /r "${SOURCE_DIR}\\*"
 
   ; Create uninstaller
   WriteUninstaller "$INSTDIR\uninstall.exe"
