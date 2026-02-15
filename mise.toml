@@ -52,7 +52,7 @@ mkdir -p /workdir/docker-output
 if [ -f /config/ui-design-overrides.json ]; then
   cp /config/ui-design-overrides.json /workdir/docker-output/ui-design-overrides.json
 fi
-chown -R "$HOST_UID:$HOST_GID" /workdir/docker-output
+chmod -R a+rwX /workdir/docker-output
 '
 
 docker run --rm \
@@ -417,11 +417,8 @@ LAUNCHER
 chmod +x codex-linux.sh
 
 # Ensure bind-mounted outputs are writable by the invoking user on the host.
-chown -R "${HOST_UID}:${HOST_GID}" /output 2>/dev/null || true
+chmod -R a+rwX /output 2>/dev/null || true
 '
-
-# Fix ownership for rootless Docker compatibility
-sudo chown -R "$(id -u):$(id -g)" "{{env.WORKDIR}}/docker-output" 2>/dev/null || true
 """
 
 [tasks."codex:prepare-bundle"]
@@ -1148,6 +1145,7 @@ depends = ["codex:build"]
 run = """
 set -euo pipefail
 appimage_path="{{config_root}}/Codex.AppImage"
+release_appimage_path="{{config_root}}/Codex-x86_64.AppImage"
 versions_file="{{config_root}}/versions.json"
 
 if ! command -v gh >/dev/null 2>&1; then
@@ -1172,11 +1170,13 @@ tag="v$app_version"
 title="Codex AppImage $app_version"
 notes="Automated AppImage release for Codex app $app_version (CLI $cli_version)."
 
+cp -f "$appimage_path" "$release_appimage_path"
+
 if gh release view "$tag" >/dev/null 2>&1; then
-  gh release upload "$tag" "$appimage_path" --clobber
+  gh release upload "$tag" "$release_appimage_path" --clobber
   gh release edit "$tag" --title "$title" --notes "$notes"
 else
-  gh release create "$tag" "$appimage_path" --title "$title" --notes "$notes"
+  gh release create "$tag" "$release_appimage_path" --title "$title" --notes "$notes"
 fi
 """
 
