@@ -70,3 +70,11 @@
 - What was learned: Changing shortcut icons is not enough for the running app; Windows titlebar/taskbar icons come from the EXE’s embedded icon, so the Electron runtime EXE must be patched (or packaged) with the correct `.ico`.
 - Better prompt suggestion for Ramiro: When reporting icon issues, specify whether you mean installer icon, Start Menu shortcut icon, or the running window/taskbar icon, since they’re controlled by different steps.
 - Current decision/next step: Trigger a new Windows build (GitHub Actions or VM build) and confirm the running app shows the Codex icon in the titlebar and taskbar.
+
+## 2026-02-15
+- Task title: Fix NSIS welcome text newlines (master)
+- Category: Procedural
+- What happened: Patched `installer/windows/codex.nsi` on `master` to use `$\r$\n` newline escapes in `MUI_TEXT_WELCOME_INFO_TEXT` so the disclaimer renders with real line breaks instead of `${\r\n}` literals.
+- What was learned: NSIS newline rendering is most reliable with `$\r$\n`; macro-style `${\r\n}` can show up verbatim depending on include/macro context.
+- Better prompt suggestion for Ramiro: When reporting installer text issues, include a screenshot and which page (welcome vs finish) so the right MUI define can be targeted.
+- Current decision/next step: Push and let CI rebuild the Windows installer; confirm the disclaimer text wraps correctly.
