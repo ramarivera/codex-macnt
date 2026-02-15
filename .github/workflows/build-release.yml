@@ -479,11 +479,22 @@ jobs:
   release:
     needs: [extract, build-windows, build-linux]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Create a GitHub Release on version tags, or when manually dispatched.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+
+      - name: Compute release tag
+        id: release-tag
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v${{ needs.extract.outputs.app_version }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -507,16 +518,17 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: ${{ steps.release-tag.outputs.tag }}
           files: |
             artifacts/windows-installer/*.exe
             artifacts/linux-appimage/*.AppImage
-          name: "Codex ${{ github.ref_name }}"
+          name: "Codex ${{ steps.release-tag.outputs.tag }}"
           body: |
             ## Unofficial community build notice
             This repository is a community-maintained project and is not affiliated with, endorsed by, or sponsored by OpenAI, ChatGPT, or Codex.
             It is a hobby/independent packaging effort with independently produced installers.
 
-            ## Codex Release ${{ github.ref_name }}
+            ## Codex Release ${{ steps.release-tag.outputs.tag }}
             
             ### Downloads
             - **Windows**: `Codex-Setup-Windows-x64.exe` - NSIS installer
@@ -550,7 +562,7 @@ jobs:
 
             🤖 *This content was generated with AI assistance using GPT-5.*
           draft: false
-          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') }}
+          prerelease: ${{ contains(steps.release-tag.outputs.tag, 'alpha') || contains(steps.release-tag.outputs.tag, 'beta') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
