@@ -102,7 +102,6 @@ run_remote_action() {
 
   require_cmd ssh
   require_cmd scp
-  require_cmd rsync
 
   ssh_host() {
     local command="$1"
@@ -223,14 +222,23 @@ EOF_ENV
 
   local sync_source="$remote_source_dir"
   ssh_host "mkdir -p ${sync_source}"
-  rsync -az -e "ssh -i '$CODEX_VM_HOST_KEY' -p $CODEX_VM_HOST_SSH_PORT -o BatchMode=yes -o StrictHostKeyChecking=accept-new" --delete \
-    --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
-    "$REPO_ROOT/" "$remote_host:$sync_source/"
+  if command -v rsync >/dev/null 2>&1 && ssh_host "command -v rsync >/dev/null 2>&1"; then
+    rsync -az -e "ssh -i '$CODEX_VM_HOST_KEY' -p $CODEX_VM_HOST_SSH_PORT -o BatchMode=yes -o StrictHostKeyChecking=accept-new" --delete \
+      --exclude '.git' --exclude 'dist' --exclude '.mise' --exclude '.github' --exclude 'infra/vm/artifacts' \
+      "$REPO_ROOT/" "$remote_host:$sync_source/"
+  else
+    log "rsync not available locally/remote; falling back to tar-over-ssh sync (slower, but works on minimal hosts)"
+    ssh_host "rm -rf '${sync_source}' && mkdir -p '${sync_source}'"
+    tar -czf - \
+      --exclude='.git' --exclude='dist' --exclude='.mise' --exclude='.github' --exclude='infra/vm/artifacts' \
+      -C "$REPO_ROOT" . | ssh -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -p "$CODEX_VM_HOST_SSH_PORT" "$remote_host" "tar -xzf - -C '$sync_source'"
+  fi
 
   log "Invoking remote build-agent: action=$action"
   local remote_rc=0
   set +e
-  ssh_host "source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}"
+  # Run with plain bash (no login shell) to avoid nushell/tailscale wrapper parsing surprises.
+  ssh -o StrictHostKeyChecking=accept-new -i "$CODEX_VM_HOST_KEY" -p "$CODEX_VM_HOST_SSH_PORT" "$remote_host" "/bin/bash -lc 'source ${remote_tmp_env}; bash ${remote_tmp_script} ${action} ${run_id} ${sync_source} ${remote_artifact_dir}'"
   remote_rc=$?
   set -e
   if ((remote_rc != 0)); then

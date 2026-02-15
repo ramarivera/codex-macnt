@@ -44,6 +44,7 @@ ARTIFACT_ROOT="${4:-${CODEX_VM_ARTIFACT_DIR:?missing CODEX_VM_ARTIFACT_DIR}}"
 : "${CODEX_VM_WINDOWS_BASE_ISO:=}"
 : "${CODEX_VM_GUEST_KEY:?$HOME/.ssh/id_ed25519}"
 : "${CODEX_VM_GUEST_KEY_STRATEGY:=managed}" # managed|provided
+: "${CODEX_VM_WINDOWS_BUILD_MODE:=guest}" # guest|host-nsis
 
 CODEX_VM_WINDOWS_ISO_PATH="${CODEX_VM_WINDOWS_ISO_PATH:-}"
 CODEX_VM_BASE_MEDIA_DIR="${CODEX_VM_BASE_MEDIA_DIR:-$CODEX_VM_BASE_DIR/media}"
@@ -67,6 +68,16 @@ mkdir -p "$CODEX_VM_LOCKS_DIR"
 log() { printf '[codex-vm:remote] %s\n' "$*" >&2; }
 fatal() { printf '[codex-vm:remote] ERROR: %s\n' "$*" >&2; exit 1; }
 
+RUN_ARTIFACT_DIR="${ARTIFACT_ROOT}/${RUN_ID}"
+mkdir -p "$RUN_ARTIFACT_DIR"
+cat >"$RUN_ARTIFACT_DIR/remote-status.txt" <<EOF_STATUS
+action=$ACTION
+run_id=$RUN_ID
+source_dir=$SOURCE_DIR
+artifact_root=$ARTIFACT_ROOT
+timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF_STATUS
+
 acquire_vm_lock() {
   local vm="$1"
   local lock_file="$CODEX_VM_LOCKS_DIR/${vm}.lock"
@@ -86,7 +97,14 @@ acquire_vm_lock() {
       log "Legacy VM lock detected (no pid); clearing: $lock_file"
       rm -f "$lock_file" || true
     elif kill -0 "$existing_pid" >/dev/null 2>&1; then
-      fatal "Another build-agent is already operating on VM '$vm' (lock: $lock_file, pid: $existing_pid)"
+      # PIDs can be reused; validate the process still looks like a codex-vm build-agent.
+      local existing_args=""
+      existing_args="$(ps -p "$existing_pid" -o args= 2>/dev/null || true)"
+      if [[ "$existing_args" == *"build-agent.sh"* || "$existing_args" == *"codex-vm"* ]]; then
+        fatal "Another build-agent is already operating on VM '$vm' (lock: $lock_file, pid: $existing_pid)"
+      fi
+      log "Stale VM lock detected (pid reused by other process: $existing_pid: $existing_args); clearing: $lock_file"
+      rm -f "$lock_file" || true
     else
       log "Stale VM lock detected (dead pid $existing_pid); clearing: $lock_file"
       rm -f "$lock_file" || true
@@ -196,6 +214,48 @@ s.bind(("0.0.0.0", 0))
   print(s.getsockname()[1])
   s.close()
 PY
+}
+
+to_windows_path() {
+  local p="$1"
+  if [[ "$p" =~ ^/([a-zA-Z])/(.*)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]^}:/${BASH_REMATCH[2]}"
+    return 0
+  fi
+  printf '%s' "$p"
+}
+
+check_host_windows_host_nsis() {
+  command -v makensis >/dev/null 2>&1 || fatal "makensis missing on VM host (install nsis)"
+  if command -v bsdtar >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v unzip >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v 7z >/dev/null 2>&1; then
+    return 0
+  fi
+  fatal "Need a zip extractor on VM host (bsdtar, unzip, or 7z)"
+}
+
+extract_zip() {
+  local zip="$1"
+  local dest="$2"
+  mkdir -p "$dest"
+  if command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xf "$zip" -C "$dest"
+    return 0
+  fi
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$zip" -d "$dest"
+    return 0
+  fi
+  if command -v 7z >/dev/null 2>&1; then
+    7z x -y "-o$dest" "$zip" >/dev/null
+    return 0
+  fi
+  return 1
 }
 
 resolve_release_tag() {
@@ -771,6 +831,210 @@ run_guest_scp_from() {
   return 255
 }
 
+run_guest_scp_to() {
+  local user="$1"
+  local port="$2"
+  local src="$3"
+  local dst="$4"
+  local candidate_list="${5:-}"
+  reset_auth_attempts
+  local -a users=()
+  local fallback_user
+
+  mapfile -t users < <(guest_auth_candidates "$user" "$candidate_list")
+
+  for fallback_user in "${users[@]}"; do
+    local attempt=1
+    while ((attempt <= 8)); do
+      local scp_opts=(
+        -o UserKnownHostsFile=/dev/null
+        -o GlobalKnownHostsFile=/dev/null
+        -o StrictHostKeyChecking=no
+        -o ConnectTimeout=15
+        -P "$port"
+      )
+
+      if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
+        scp -i "$CODEX_VM_GUEST_KEY" \
+          -o BatchMode=yes \
+          -o PreferredAuthentications=publickey \
+          -o PasswordAuthentication=no \
+          -o PubkeyAuthentication=yes \
+          "${scp_opts[@]}" \
+          "$src" "${fallback_user}@127.0.0.1:$dst" >/dev/null 2>&1
+        local rc=$?
+        if (( rc == 0 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return 0
+        fi
+        if (( rc != 255 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return "$rc"
+        fi
+        capture_auth_attempt "$fallback_user" "key" "$attempt" /dev/null
+      fi
+
+      if [[ -n "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
+        if command -v sshpass >/dev/null 2>&1; then
+          sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+            scp \
+              -o BatchMode=no \
+              -o PreferredAuthentications=password \
+              -o PubkeyAuthentication=no \
+              -o PasswordAuthentication=yes \
+              -o KbdInteractiveAuthentication=no \
+              "${scp_opts[@]}" \
+              "$src" "${fallback_user}@127.0.0.1:$dst" >/dev/null 2>&1
+          local rc=$?
+          if (( rc == 0 )); then
+            CODEX_VM_GUEST_USER="$fallback_user"
+            return 0
+          fi
+          if (( rc != 255 )); then
+            CODEX_VM_GUEST_USER="$fallback_user"
+            return "$rc"
+          fi
+          capture_auth_attempt "$fallback_user" "sshpass" "$attempt" /dev/null
+        fi
+
+        local askpass_script=""
+        askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
+        SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
+          setsid scp \
+            -o BatchMode=no \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o PasswordAuthentication=yes \
+            -o KbdInteractiveAuthentication=no \
+            "${scp_opts[@]}" \
+            "$src" "${fallback_user}@127.0.0.1:$dst" < /dev/null >/dev/null 2>&1
+        local rc=$?
+        rm -f "$askpass_script"
+        if (( rc == 0 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return 0
+        fi
+        if (( rc != 255 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return "$rc"
+        fi
+        capture_auth_attempt "$fallback_user" "askpass" "$attempt" /dev/null
+      fi
+
+      log "Guest scp push attempt ${attempt}/8 failed for ${fallback_user}@127.0.0.1:${port}; retrying..."
+      ((attempt += 1))
+      sleep 2
+    done
+  done
+
+  if [[ -n "$CODEX_VM_GUEST_AUTH_ATTEMPTS" ]]; then
+    log "SCP auth attempts: $CODEX_VM_GUEST_AUTH_ATTEMPTS"
+  fi
+  return 255
+}
+
+run_guest_scp_file() {
+  local user="$1"
+  local port="$2"
+  local src="$3"
+  local dst="$4"
+  local candidate_list="${5:-}"
+  reset_auth_attempts
+  local -a users=()
+  local fallback_user
+
+  mapfile -t users < <(guest_auth_candidates "$user" "$candidate_list")
+
+  for fallback_user in "${users[@]}"; do
+    local attempt=1
+    while ((attempt <= 8)); do
+      local scp_opts=(
+        -o UserKnownHostsFile=/dev/null
+        -o GlobalKnownHostsFile=/dev/null
+        -o StrictHostKeyChecking=no
+        -o ConnectTimeout=15
+        -P "$port"
+      )
+
+      if [[ -f "$CODEX_VM_GUEST_KEY" ]]; then
+        scp -i "$CODEX_VM_GUEST_KEY" \
+          -o BatchMode=yes \
+          -o PreferredAuthentications=publickey \
+          -o PasswordAuthentication=no \
+          -o PubkeyAuthentication=yes \
+          "${scp_opts[@]}" \
+          "${fallback_user}@127.0.0.1:$src" "$dst" >/dev/null 2>&1
+        local rc=$?
+        if (( rc == 0 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return 0
+        fi
+        if (( rc != 255 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return "$rc"
+        fi
+        capture_auth_attempt "$fallback_user" "key" "$attempt" /dev/null
+      fi
+
+      if [[ -n "${CODEX_VM_GUEST_PASSWORD:-}" ]]; then
+        if command -v sshpass >/dev/null 2>&1; then
+          sshpass -p "$CODEX_VM_GUEST_PASSWORD" \
+            scp \
+              -o BatchMode=no \
+              -o PreferredAuthentications=password \
+              -o PubkeyAuthentication=no \
+              -o PasswordAuthentication=yes \
+              -o KbdInteractiveAuthentication=no \
+              "${scp_opts[@]}" \
+              "${fallback_user}@127.0.0.1:$src" "$dst" >/dev/null 2>&1
+          local rc=$?
+          if (( rc == 0 )); then
+            CODEX_VM_GUEST_USER="$fallback_user"
+            return 0
+          fi
+          if (( rc != 255 )); then
+            CODEX_VM_GUEST_USER="$fallback_user"
+            return "$rc"
+          fi
+          capture_auth_attempt "$fallback_user" "sshpass" "$attempt" /dev/null
+        fi
+
+        local askpass_script=""
+        askpass_script="$(guest_askpass_script "$CODEX_VM_GUEST_PASSWORD")"
+        SSH_ASKPASS_REQUIRE=force SSH_ASKPASS="$askpass_script" DISPLAY=:0 \
+          setsid scp \
+            -o BatchMode=no \
+            -o PreferredAuthentications=password \
+            -o PubkeyAuthentication=no \
+            -o PasswordAuthentication=yes \
+            -o KbdInteractiveAuthentication=no \
+            "${scp_opts[@]}" \
+            "${fallback_user}@127.0.0.1:$src" "$dst" < /dev/null >/dev/null 2>&1
+        local rc=$?
+        rm -f "$askpass_script"
+        if (( rc == 0 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return 0
+        fi
+        if (( rc != 255 )); then
+          CODEX_VM_GUEST_USER="$fallback_user"
+          return "$rc"
+        fi
+        capture_auth_attempt "$fallback_user" "askpass" "$attempt" /dev/null
+      fi
+
+      log "Guest scp pull attempt ${attempt}/8 failed for ${fallback_user}@127.0.0.1:${port}; retrying..."
+      ((attempt += 1))
+      sleep 2
+    done
+  done
+
+  if [[ -n "$CODEX_VM_GUEST_AUTH_ATTEMPTS" ]]; then
+    log "SCP auth attempts: $CODEX_VM_GUEST_AUTH_ATTEMPTS"
+  fi
+  return 255
+}
+
 vm_exists() {
   VBoxManage showvminfo "$1" --machinereadable >/dev/null 2>&1
 }
@@ -822,6 +1086,7 @@ vm_wait_for_port() {
   local port="$1"
   local timeout="${2:-240}"
   local i=0
+  local last_log=0
   while ((i < timeout)); do
     if command -v nc >/dev/null 2>&1; then
       if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
@@ -829,6 +1094,10 @@ vm_wait_for_port() {
       fi
     elif (bash -c ":</dev/tcp/127.0.0.1/$port") >/dev/null 2>&1; then
       return 0
+    fi
+    if (( (i - last_log) >= 30 )); then
+      log "Waiting for guest TCP port: 127.0.0.1:${port} (${i}s/${timeout}s)"
+      last_log="$i"
     fi
     sleep 1
     i=$((i + 1))
@@ -841,6 +1110,7 @@ vm_wait_for_ssh_server() {
   local user="${2:-root}"
   local timeout="${3:-240}"
   local i=0
+  local last_log=0
   local out=""
 
   while ((i < timeout)); do
@@ -867,6 +1137,10 @@ vm_wait_for_ssh_server() {
       "$user@127.0.0.1" exit 2>&1 || true)"
     if [[ "$out" == *"Permission denied"* || "$out" == *"no more authentication methods"* ]]; then
       return 0
+    fi
+    if (( (i - last_log) >= 30 )); then
+      log "Waiting for guest SSH server: ${user}@127.0.0.1:${port} (${i}s/${timeout}s)"
+      last_log="$i"
     fi
     sleep 1
     i=$((i + 1))
@@ -1321,17 +1595,29 @@ BOOTSTRAP
     gfx="vboxsvga"
   fi
 
-  VBoxManage modifyvm "$vm" \
-    --cpus "$cpus" \
-    --memory "$memory" \
-    --ioapic on \
-    --graphicscontroller "$gfx" \
-    --vram 64 \
-    --audio none \
-    --nic1 nat \
-    --cableconnected1 on \
-    >/dev/null
-  vm_apply_stability_tweaks "$vm" "$ostype"
+	  VBoxManage modifyvm "$vm" \
+	    --cpus "$cpus" \
+	    --memory "$memory" \
+	    --ioapic on \
+	    --graphicscontroller "$gfx" \
+	    --vram 64 \
+	    --audio none \
+	    --nic1 nat \
+	    --cableconnected1 on \
+	    >/dev/null
+
+	  # Windows 11 guests typically require EFI + TPM 2.0 (VirtualBox 7+).
+	  # Best-effort: older VirtualBox builds may not support these flags.
+	  local lower_iso
+	  lower_iso="$(basename "$iso" | tr '[:upper:]' '[:lower:]')"
+	  if [[ "$ostype" == "Windows11_64" || "$lower_iso" == *"win11"* ]]; then
+	    VBoxManage modifyvm "$vm" --firmware efi >/dev/null 2>&1 || true
+	    VBoxManage modifyvm "$vm" --chipset ich9 >/dev/null 2>&1 || true
+	    VBoxManage modifyvm "$vm" --hpet on >/dev/null 2>&1 || true
+	    VBoxManage modifyvm "$vm" --rtcuseutc on >/dev/null 2>&1 || true
+	    VBoxManage modifyvm "$vm" --tpm-type 2.0 >/dev/null 2>&1 || true
+	  fi
+	  vm_apply_stability_tweaks "$vm" "$ostype"
 
   local disk_path="$CODEX_VM_BASE_DIR/disks/${vm}.vdi"
   VBoxManage createmedium disk --filename "$disk_path" --size "$((disk_gb * 1024))" --format VDI >/dev/null
@@ -1383,18 +1669,6 @@ vm_prepare() {
     fi
   fi
 
-  if [[ "$reused_vm" -ne 1 ]]; then
-    if [[ -n "$base_ova" ]]; then
-      vm_import_ova "$vm" "$base_ova" "$cpus" "$memory" "$ostype"
-    elif [[ -n "$base_iso" ]]; then
-      vm_create_from_iso "$vm" "$base_iso" "$cpus" "$memory" "$disk" "$ostype" "$user" "$password"
-    else
-      fatal "Missing Linux/Windows base OVA/ISO for $vm"
-    fi
-
-    vm_start "$vm" "$port" "$user"
-  fi
-
   local tcp_timeout="${CODEX_VM_TCP_READY_TIMEOUT:-240}"
   local ssh_timeout="${CODEX_VM_SSH_READY_TIMEOUT:-240}"
   local login_timeout="${CODEX_VM_GUEST_LOGIN_TIMEOUT:-900}"
@@ -1404,6 +1678,38 @@ vm_prepare() {
     login_timeout="${CODEX_VM_GUEST_LOGIN_TIMEOUT:-3600}"
     ssh_timeout="${CODEX_VM_SSH_READY_TIMEOUT:-1800}"
     tcp_timeout="${CODEX_VM_TCP_READY_TIMEOUT:-1800}"
+  fi
+
+  # If we're reusing an existing VM that was imported from a stable OVA and SSH
+  # isn't coming up quickly, it's likely broken. Fail fast and recreate once.
+  # Do NOT do this for ISO-based installs: Windows/Linux unattended installs
+  # can take many minutes before SSH is ready.
+  if [[ "$reused_vm" -eq 1 && "$lifecycle_mode" != "recreate" && -n "$base_ova" ]]; then
+    local reuse_probe_timeout="${CODEX_VM_REUSE_PROBE_TIMEOUT:-120}"
+    if ! vm_wait_for_port "$port" "$reuse_probe_timeout"; then
+      log "Reuse probe: TCP port not ready after ${reuse_probe_timeout}s; recreating VM $vm"
+      if ! vm_refresh "$vm" "recreate"; then
+        fatal "Failed to reset VM in recreate mode for $vm"
+      fi
+      reused_vm=0
+    elif ! vm_wait_for_ssh_server "$port" "$user" "$reuse_probe_timeout"; then
+      log "Reuse probe: SSH server not ready after ${reuse_probe_timeout}s; recreating VM $vm"
+      if ! vm_refresh "$vm" "recreate"; then
+        fatal "Failed to reset VM in recreate mode for $vm"
+      fi
+      reused_vm=0
+    fi
+  fi
+
+  if [[ "$reused_vm" -ne 1 ]]; then
+    if [[ -n "$base_ova" ]]; then
+      vm_import_ova "$vm" "$base_ova" "$cpus" "$memory" "$ostype"
+    elif [[ -n "$base_iso" ]]; then
+      vm_create_from_iso "$vm" "$base_iso" "$cpus" "$memory" "$disk" "$ostype" "$user" "$password"
+    else
+      fatal "Missing Linux/Windows base OVA/ISO for $vm"
+    fi
+    vm_start "$vm" "$port" "$user"
   fi
 
   vm_wait_for_port "$port" "$tcp_timeout" || fatal "guest TCP port did not become ready on port $port (timeout ${tcp_timeout}s)"
@@ -1741,7 +2047,10 @@ check_host() {
   VBoxManage --version >/dev/null
   command -v ssh >/dev/null || fatal "ssh missing"
   command -v scp >/dev/null || fatal "scp missing"
-  command -v rsync >/dev/null || fatal "rsync missing"
+  # rsync is optional (we can fall back to tar-over-ssh sync).
+  if ! command -v rsync >/dev/null 2>&1; then
+    log "rsync not available on host; will fall back to tar-based sync when needed"
+  fi
   command -v ssh-keygen >/dev/null || fatal "ssh-keygen missing"
   prepare_base_media
   ensure_usable_guest_key "$CODEX_VM_GUEST_KEY"
@@ -2027,10 +2336,7 @@ copy_to_windows_guest() {
   local dst="$4"
 
   local win_dst
-  win_dst="$dst"
-  if [[ "$win_dst" =~ ^/([a-zA-Z])/(.*)$ ]]; then
-    win_dst="${BASH_REMATCH[1]^}:/${BASH_REMATCH[2]}"
-  fi
+  win_dst="$(to_windows_path "$dst")"
 
   local tmp_tar="/tmp/codex-vm-src-${RUN_ID}.tar.gz"
   rm -f "$tmp_tar"
@@ -2040,16 +2346,14 @@ copy_to_windows_guest() {
 
   # Copy tarball to Windows user home (OpenSSH scp understands C:/ paths).
   run_guest_ssh "$user" "$port" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path 'C:/Users/${user}/codex-vm-tmp' | Out-Null\""
-  scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o GlobalKnownHostsFile=/dev/null -P "$port" \
-    -i "$CODEX_VM_GUEST_KEY" \
-    "$tmp_tar" "${user}@127.0.0.1:C:/Users/${user}/codex-vm-tmp/src.tar.gz" >/dev/null 2>&1 || {
-      fatal "Failed to scp source tarball to Windows guest (need OpenSSH + scp)."
-    }
+  if ! run_guest_scp_to "$user" "$port" "$tmp_tar" "C:/Users/${user}/codex-vm-tmp/src.tar.gz"; then
+    fatal "Failed to scp source tarball to Windows guest (need OpenSSH + scp)."
+  fi
 
   run_guest_ssh "$user" "$port" "powershell -NoProfile -ExecutionPolicy Bypass -Command \"
     New-Item -ItemType Directory -Force -Path '${win_dst}' | Out-Null;
     if (Test-Path '${win_dst}\\\\*') { Remove-Item -Recurse -Force '${win_dst}\\\\*' -ErrorAction SilentlyContinue };
-    tar -xzf 'C:/Users/${user}/codex-vm-tmp/src.tar.gz' -C '${win_dst}';
+    if (Get-Command tar -ErrorAction SilentlyContinue) { tar -xzf 'C:/Users/${user}/codex-vm-tmp/src.tar.gz' -C '${win_dst}' } else { throw 'tar is not available in this Windows guest' };
   \""
 }
 
@@ -2058,53 +2362,153 @@ run_windows() {
   CODEX_VM_GUEST_PASSWORD="${CODEX_VM_GUEST_PASSWORD:-$CODEX_VM_WINDOWS_GUEST_PASSWORD}"
 
   local preferred_port="$CODEX_VM_WINDOWS_SSH_PORT"
-  CODEX_VM_WINDOWS_SSH_PORT="$preferred_port"
+  local chosen_port
+  chosen_port="$(pick_free_port "$preferred_port")"
+  if [[ "$chosen_port" != "$preferred_port" ]]; then
+    log "Host port ${preferred_port} is busy; using ${chosen_port} for Windows guest SSH forwarding"
+  fi
+  CODEX_VM_WINDOWS_SSH_PORT="$chosen_port"
 
   local windows_base_ova="$CODEX_VM_WINDOWS_BASE_OVA"
   local windows_base_iso="$CODEX_VM_WINDOWS_BASE_ISO"
+  local windows_ostype="$CODEX_VM_WINDOWS_VM_OSTYPE"
+
+  # Prefer a pre-provisioned Windows OVA if one exists under the base media dir.
+  # Unattended installs from Windows desktop ISOs are fragile and slow.
+  if [[ -z "$windows_base_ova" ]]; then
+    windows_base_ova="$(resolve_windows_base_appliance || true)"
+    if [[ -n "$windows_base_ova" ]]; then
+      log "Using detected Windows base OVA: $windows_base_ova"
+      CODEX_VM_WINDOWS_BASE_OVA="$windows_base_ova"
+    fi
+  fi
 
   if [[ -z "$windows_base_iso" && -n "${CODEX_VM_WINDOWS_ISO_PATH:-}" ]]; then
     windows_base_iso="$CODEX_VM_WINDOWS_ISO_PATH"
     log "No CODEX_VM_WINDOWS_BASE_ISO configured; falling back to CODEX_VM_WINDOWS_ISO_PATH=$windows_base_iso"
   fi
 
+  if [[ -n "$windows_base_iso" ]]; then
+    local lower_iso
+    lower_iso="$(basename "$windows_base_iso" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$lower_iso" == *"win11"* && "$windows_ostype" != "Windows11_64" ]]; then
+      log "Windows ISO looks like Windows 11; overriding ostype to Windows11_64 for unattended install"
+      windows_ostype="Windows11_64"
+    fi
+  fi
+
+  log "Preparing Windows VM: vm=$CODEX_VM_WINDOWS_VM_NAME port=$CODEX_VM_WINDOWS_SSH_PORT lifecycle=$CODEX_VM_LIFECYCLE_MODE"
   if ! vm_prepare "$CODEX_VM_WINDOWS_VM_NAME" "$windows_base_ova" "$windows_base_iso" \
-    "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$CODEX_VM_WINDOWS_VM_OSTYPE" \
+    "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$windows_ostype" \
     "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_GUEST_PASSWORD" "$CODEX_VM_WINDOWS_GUEST_USER"; then
     fatal "Windows SSH login did not become ready on port $CODEX_VM_WINDOWS_SSH_PORT"
   fi
 
-  if ! run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "command -v powershell >/dev/null 2>&1 || command -v pwsh >/dev/null 2>&1"; then
+  log "Windows guest SSH is ready; probing PowerShell availability"
+  if ! run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "powershell -NoProfile -ExecutionPolicy Bypass -Command \"exit 0\""; then
     log "Windows probe failed on $CODEX_VM_WINDOWS_VM_NAME at port $CODEX_VM_WINDOWS_SSH_PORT; forcing VM recreation from Windows media"
     if ! vm_prepare "$CODEX_VM_WINDOWS_VM_NAME" "$windows_base_ova" "$windows_base_iso" \
-      "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$CODEX_VM_WINDOWS_VM_OSTYPE" \
+      "$CODEX_VM_WINDOWS_VM_CPUS" "$CODEX_VM_WINDOWS_VM_MEMORY_MB" "$CODEX_VM_WINDOWS_VM_DISK_GB" "$windows_ostype" \
       "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_GUEST_PASSWORD" "$CODEX_VM_WINDOWS_GUEST_USER" "recreate"; then
       fatal "Windows VM recreation failed while attempting to restore a Windows-capable guest"
     fi
 
-    if ! run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "command -v powershell >/dev/null 2>&1 || command -v pwsh >/dev/null 2>&1"; then
+    if ! run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "powershell -NoProfile -ExecutionPolicy Bypass -Command \"exit 0\""; then
       fatal "Windows probe still failing after recreation; verify CODX_VM_WINDOWS_BASE_ISO/base_ova points to a valid Windows image"
     fi
   fi
 
-  run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "New-Item -ItemType Directory -Path '$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output' -Force | Out-Null"
+  local win_workspace
+  win_workspace="$(to_windows_path "$CODEX_VM_WINDOWS_WORKSPACE")"
+  local win_out_dir
+  win_out_dir="$(to_windows_path "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output")"
+  local win_build_ps1
+  win_build_ps1="$(to_windows_path "$CODEX_VM_WINDOWS_WORKSPACE/infra/vm/guest/windows-build.ps1")"
+
+  log "Syncing source into Windows guest workspace: $win_workspace"
+  run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "powershell -NoProfile -Command \"New-Item -ItemType Directory -Path '${win_out_dir}' -Force | Out-Null\""
   copy_to_windows_guest "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$SOURCE_DIR" "$CODEX_VM_WINDOWS_WORKSPACE"
 
-  run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "
-    powershell -NoProfile -ExecutionPolicy Bypass -File '$CODEX_VM_WINDOWS_WORKSPACE/infra/vm/guest/windows-build.ps1' \
-      -ProjectPath '$CODEX_VM_WINDOWS_WORKSPACE' -RunId '$RUN_ID' \
-      -GitRef '$CODEX_VM_CODEX_GIT_REF' -DmgUrl '$CODEX_VM_CODEX_DMG_URL' \
-      -OutputDir '$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output' \
-      -EnableLinuxUiPolish '$CODEX_VM_ENABLE_LINUX_UI_POLISH' \
-      -SkipRustBuild '$CODEX_VM_SKIP_RUST_BUILD' \
-      -SkipRebuildNative '$CODEX_VM_SKIP_REBUILD_NATIVE' \
-      -PrebuiltCliUrl '$CODEX_VM_PREBUILT_WIN_CLI_URL'
-  "
+  local ps_skip_rust='$false'
+  local ps_skip_native='$false'
+  if [[ "$CODEX_VM_SKIP_RUST_BUILD" == "1" ]]; then
+    ps_skip_rust='$true'
+  fi
+  if [[ "$CODEX_VM_SKIP_REBUILD_NATIVE" == "1" ]]; then
+    ps_skip_native='$true'
+  fi
+
+  log "Running Windows build script in guest"
+  run_guest_ssh "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "powershell -NoProfile -ExecutionPolicy Bypass -File \"${win_build_ps1}\" -ProjectPath \"${win_workspace}\" -RunId \"${RUN_ID}\" -GitRef \"${CODEX_VM_CODEX_GIT_REF}\" -DmgUrl \"${CODEX_VM_CODEX_DMG_URL}\" -OutputDir \"${win_out_dir}\" -EnableLinuxUiPolish \"${CODEX_VM_ENABLE_LINUX_UI_POLISH}\" -SkipRustBuild:${ps_skip_rust} -SkipRebuildNative:${ps_skip_native} -PrebuiltCliUrl \"${CODEX_VM_PREBUILT_WIN_CLI_URL}\""
 
   local out_dir="$ARTIFACT_ROOT/$RUN_ID/windows"
   mkdir -p "$out_dir"
-  run_guest_scp_from "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output/Codex-Setup-Windows-x64.exe" "$out_dir/Codex-Setup-Windows-x64.exe"
-  run_guest_scp_from "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output/manifest.json" "$out_dir/manifest.json"
+  log "Pulling Windows artifacts back to host"
+  run_guest_scp_file "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$(to_windows_path "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output/Codex-Setup-Windows-x64.exe")" "$out_dir/Codex-Setup-Windows-x64.exe"
+  run_guest_scp_file "$CODEX_VM_WINDOWS_GUEST_USER" "$CODEX_VM_WINDOWS_SSH_PORT" "$(to_windows_path "$CODEX_VM_WINDOWS_WORKSPACE/.codex-vm-output/manifest.json")" "$out_dir/manifest.json"
+}
+
+run_windows_host_nsis() {
+  check_host_windows_host_nsis
+
+  local zip="$SOURCE_DIR/Codex-Windows-x64.zip"
+  if [[ ! -f "$zip" ]]; then
+    fatal "Missing bundled Windows zip in source tree: $zip"
+  fi
+
+  local work_dir=""
+  work_dir="$(mktemp -d "$CODEX_VM_BASE_DIR/tmp/codex-winhost-${RUN_ID}.XXXXXX")"
+  local extract_dir="$work_dir/extract"
+  local dist_dir=""
+  local out_dir="$ARTIFACT_ROOT/$RUN_ID/windows"
+  mkdir -p "$out_dir"
+
+  # Best-effort cleanup; keep artifacts.
+  trap 'rm -rf "'"$work_dir"'" >/dev/null 2>&1 || true' EXIT INT TERM HUP
+
+  log "Host NSIS build: extracting $zip"
+  extract_zip "$zip" "$extract_dir" || fatal "Failed to extract $zip"
+
+  if [[ -d "$extract_dir/codex-windows-x64" ]]; then
+    dist_dir="$extract_dir/codex-windows-x64"
+  else
+    dist_dir="$(find "$extract_dir" -maxdepth 3 -type d -name 'codex-windows-x64' 2>/dev/null | head -n 1 || true)"
+  fi
+  if [[ -z "$dist_dir" || ! -d "$dist_dir" ]]; then
+    fatal "Bundled zip did not contain expected folder 'codex-windows-x64' at root"
+  fi
+
+  local nsis_script="$SOURCE_DIR/installer/windows/codex.nsi"
+  if [[ ! -f "$nsis_script" ]]; then
+    fatal "NSIS script missing: $nsis_script"
+  fi
+
+  log "Host NSIS build: compiling installer (SOURCE_DIR=$dist_dir)"
+  local nsis_log="$out_dir/makensis.log"
+  (
+    cd "$out_dir"
+    makensis -V2 "-DAPP_VERSION=Windows" "-DSOURCE_DIR=$dist_dir" "$nsis_script" >"$nsis_log" 2>&1
+  ) || {
+    log "makensis failed; tail of log:"
+    tail -n 60 "$nsis_log" >&2 || true
+    fatal "makensis failed (see $nsis_log)"
+  }
+
+  if [[ ! -f "$out_dir/Codex-Setup-Windows-x64.exe" ]]; then
+    fatal "NSIS did not produce expected output: $out_dir/Codex-Setup-Windows-x64.exe"
+  fi
+
+  cat > "$out_dir/manifest.json" <<EOF
+{
+  "run_id": "$RUN_ID",
+  "platform": "windows",
+  "builder": "host-nsis",
+  "artifact": "Codex-Setup-Windows-x64.exe",
+  "timestamp_utc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+EOF
+
+  log "Host NSIS build complete: $out_dir/Codex-Setup-Windows-x64.exe"
 }
 
 ensure_prebuilt_urls
@@ -2119,12 +2523,20 @@ case "$ACTION" in
     ;;
   windows|win)
     check_host
-    run_windows
+    if [[ "${CODEX_VM_WINDOWS_BUILD_MODE}" == "host-nsis" ]]; then
+      run_windows_host_nsis
+    else
+      run_windows
+    fi
     ;;
   both)
     check_host
     run_linux
-    run_windows
+    if [[ "${CODEX_VM_WINDOWS_BUILD_MODE}" == "host-nsis" ]]; then
+      run_windows_host_nsis
+    else
+      run_windows
+    fi
     ;;
   *)
     fatal "unknown action '$ACTION'"

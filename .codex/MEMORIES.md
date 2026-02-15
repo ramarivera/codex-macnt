@@ -54,3 +54,11 @@
 - What was learned: Thin “glue” scripts fail most often on small mismatches (config key naming, missing intermediate dirs, accidental hardcoding). Static checks (`bash -n`) plus a quick diff audit catches most of these early.
 - Better prompt suggestion for Ramiro: When you add an orchestration layer, ask me to validate it end-to-end as “config -> runner -> guest build -> artifact fetch”, and I’ll explicitly check for key mismatches and path creation.
 - Current decision/next step: Try `mise run codex:vm:check` with a real `~/.config/codex-vm/config.toml` and then run `mise run codex:vm:build` to validate artifacts round-trip.
+
+## 2026-02-15
+- Task title: Make Windows VM build work over SSH (Arch/Cachy host)
+- Category: Procedural
+- What happened: Hardened the VM orchestrator so Windows guest operations do not assume a Unix shell and do not rely on `cat`-based artifact pulls; switched Windows artifact transfer to `scp` and added password-capable `scp` helpers; ensured Windows paths are normalized (`/c/...` -> `C:/...`) before calling `powershell -File`.
+- What was learned: Windows guests over OpenSSH are easiest when all remote commands are explicit `powershell ...` and file transfer uses `scp` rather than trying to stream bytes via `ssh ... cat`.
+- Better prompt suggestion for Ramiro: When a VM build fails, paste the first failing SSH command line and the exact exit code; it usually reveals whether the remote shell assumptions are wrong.
+- Current decision/next step: Run `mise run codex:vm:win:build` against the Arch/Cachy VM host and, if it fails, capture the remote run folder under `infra/vm/artifacts/<run_id>/` for diagnostics.
